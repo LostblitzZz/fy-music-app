@@ -1,0 +1,27 @@
+{
+  "name": "fy-music-app",
+  "version": "1.0.0",
+  "description": "Fy Music APP - Premium Discord music bot by Raitzu. Built with discord.js v14, @discordjs/voice, and yt-dlp.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "setup": "node setup.js",
+    "dev": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.0.0",
+    "ffmpeg-static": "^5.3.0",
+    "libsodium-wrappers": "^0.7.13",
+    "lyrics-finder": "^21.7.0",
+    "node-fetch": "^3.3.2",
+    "opusscript": "0.0.8",
+    "spotify-url-info": "^3.3.0",
+    "yt-dlp-exec": "^1.0.2",
+    "yt-search": "^2.10.1"
+  }
+}
