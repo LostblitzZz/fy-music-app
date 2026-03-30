@@ -20,6 +20,9 @@ docker-compose.yml
 bot.log
 *.log
 
+# Runtime state
+data/player-state.json
+
 # OS
 .DS_Store
 Thumbs.db

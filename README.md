@@ -18,7 +18,8 @@ Designed & Developed with ❤️ by **Raitzu**.
 -   **Multi-Platform Support**: Play tracks directly from **YouTube**, **Spotify**, and **SoundCloud**.
 -   **Autoplay Mode**: Automatically suggests and plays related tracks when the queue is empty to keep the music going.
 -   **Radio Stations**: Access 24/7 curated stations for various genres such as Lo-Fi, Jazz, and K-Pop.
--   **Lyric Integration**: Fetch and display lyrics for the currently playing song within Discord.
+-   **Strict Lyrics + Pagination**: Fetch lyrics with strict title/artist filtering and navigate long lyrics with next/prev buttons.
+-   **Audio Preset (EQ Style)**: Tune sound character with presets like bass boost, vocal boost, bright, and studio.
 -   **24/7 Connectivity**: Keep the bot active in your voice channel even when idle.
 -   **Lossless Quality**: Optimized audio streaming utilizing `yt-dlp` for the best possible fidelity.
 
@@ -54,6 +55,7 @@ Designed & Developed with ❤️ by **Raitzu**.
 | `/queue` | Displays the current musical queue |
 | `/radio` | Starts a genre-based radio station |
 | `/autoplay` | Toggles the automatic recommendation system |
+| `/preset` | Sets audio preset/EQ mode |
 | `/247` | Toggles 24/7 mode in the voice channel |
 
 ---
@@ -72,7 +74,8 @@ Dibuat dengan sepenuh hati oleh **Raitzu**.
 -   **Dukungan Multi-Platform**: Mendukung pemutaran musik dari **YouTube**, **Spotify**, hingga **SoundCloud**. 
 -   **Mode Autoplay**: Menambahkan rekomendasi lagu secara otomatis saat antrean habis agar musik tidak terhenti.
 -   **Stasiun Radio**: Tersedia pilihan stasiun radio 24/7 untuk berbagai genre seperti Lo-Fi, Jazz, dan K-Pop.
--   **Pencarian Lirik**: Menampilkan lirik lagu yang sedang diputar secara langsung di dalam Discord.
+-   **Lirik Strict + Pagination**: Menampilkan lirik lagu dengan filter ketat judul/artis serta tombol next/prev untuk lirik panjang.
+-   **Audio Preset (Gaya EQ)**: Atur karakter suara dengan preset seperti bass boost, vocal boost, bright, dan studio.
 -   **Mode 24/7**: Bot tetap berada di dalam *Voice Channel* secara terus-menerus meskipun tidak ada aktivitas.
 -   **Audio Berkualitas Tinggi**: Proses *streaming* dioptimalkan menggunakan *engine* `yt-dlp` untuk kualitas suara terbaik.
 
@@ -108,6 +111,7 @@ Dibuat dengan sepenuh hati oleh **Raitzu**.
 | `/queue` | Melihat daftar lagu dalam antrean |
 | `/radio` | Memilih genre stasiun radio tertentu |
 | `/autoplay` | Mengaktifkan atau menonaktifkan sistem rekomendasi otomatis |
+| `/preset` | Mengatur mode audio preset/EQ |
 | `/247` | Mengaktifkan mode standby 24/7 di Voice Channel |
 
 ## 🤝 Dukungan
