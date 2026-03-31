@@ -44,6 +44,30 @@ Designed & Developed with ❤️ by **Raitzu**.
     npm start
     ```
 
+## 🔄 Update on Another Laptop (PM2)
+
+If this bot is running 24/7 on another Windows laptop using PM2, you can update it from terminal with one command:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AutoStash
+```
+
+What this script does:
+- Pulls the newest code from GitHub.
+- Installs production dependencies.
+- Auto-detects the PM2 app from the current project folder.
+- Restarts PM2 app and saves PM2 state.
+
+Optional parameters:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
+```
+
+- `-AppName` to force a specific PM2 app name.
+- `-ShowLogs` to show latest PM2 logs after restart.
+- `-SkipNpm` to skip dependency installation.
+
 ## 📜 Available Commands
 
 | Command | Description |
@@ -99,6 +123,30 @@ Dibuat dengan sepenuh hati oleh **Raitzu**.
     ```bash
     npm start
     ```
+
+## 🔄 Update di Laptop Lain (PM2)
+
+Kalau bot ini jalan 24/7 di laptop Windows lain pakai PM2, update cukup lewat terminal dengan satu perintah:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AutoStash
+```
+
+Yang dilakukan skrip:
+- Tarik kode terbaru dari GitHub.
+- Instal dependency produksi.
+- Auto-detect nama app PM2 dari folder project saat ini.
+- Restart app PM2 lalu simpan state PM2.
+
+Parameter opsional:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
+```
+
+- `-AppName` untuk paksa nama app PM2 tertentu.
+- `-ShowLogs` untuk menampilkan log PM2 setelah restart.
+- `-SkipNpm` untuk lewati instal dependency.
 
 ## 📜 Perintah Tersedia
 
