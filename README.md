@@ -44,9 +44,9 @@ Designed & Developed with ❤️ by **Raitzu**.
     npm start
     ```
 
-## 🔄 Update on Another Laptop (PM2)
+## 🔄 Update on Windows VPS or Server (PM2)
 
-If this bot is running 24/7 on another Windows laptop using PM2, you can update it from terminal with one command:
+If this bot is running 24/7 on a Windows VPS or server using PM2, you can update it from terminal with one command:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\update-now.ps1
@@ -136,9 +136,9 @@ Dibuat dengan sepenuh hati oleh **Raitzu**.
     npm start
     ```
 
-## 🔄 Update di Laptop Lain (PM2)
+## 🔄 Update di Windows VPS atau Server (PM2)
 
-Kalau bot ini jalan 24/7 di laptop Windows lain pakai PM2, update cukup lewat terminal dengan satu perintah:
+Kalau bot ini jalan 24/7 di Windows VPS atau server pakai PM2, update cukup lewat terminal dengan satu perintah:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\update-now.ps1
