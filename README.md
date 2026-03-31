@@ -44,45 +44,6 @@ Designed & Developed with ❤️ by **Raitzu**.
     npm start
     ```
 
-## 🔄 Update on Windows VPS or Server (PM2)
-
-If this bot is running 24/7 on a Windows VPS or server using PM2, you can update it from terminal with one command:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\update-now.ps1
-```
-
-What this script does:
-- Pulls the newest code from GitHub.
-- Installs production dependencies only when needed (or when forced).
-- Stops the PM2 app temporarily before dependency install to avoid file locks.
-- Auto-detects the PM2 app from the current project folder.
-- If Python is unavailable, it falls back to no-python install mode and prepares standalone `yt-dlp.exe` automatically.
-- Restarts PM2 app and saves PM2 state.
-
-Shortcut note:
-- `update-now.ps1` is a wrapper that calls `update-bot.ps1` with practical defaults.
-- AutoStash is enabled by default in wrapper mode.
-
-Optional parameters:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -ShowLogs
-powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app -ShowLogs
-```
-
-- `-AppName` to force a specific PM2 app name.
-- `-ShowLogs` to show latest PM2 logs after restart.
-- `-SkipNpm` to skip dependency installation (only when dependencies are already installed).
-- `-ForceNpm` to force dependency installation.
-- `-NoAutoStash` to disable auto stash.
-
-Advanced mode (full control):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
-```
-
 ## 📜 Available Commands
 
 | Command | Description |
@@ -138,45 +99,6 @@ Dibuat dengan sepenuh hati oleh **Raitzu**.
     ```bash
     npm start
     ```
-
-## 🔄 Update di Windows VPS atau Server (PM2)
-
-Kalau bot ini jalan 24/7 di Windows VPS atau server pakai PM2, update cukup lewat terminal dengan satu perintah:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\update-now.ps1
-```
-
-Yang dilakukan skrip:
-- Tarik kode terbaru dari GitHub.
-- Instal dependency produksi hanya saat perlu (atau saat dipaksa).
-- Stop app PM2 sementara sebelum instal dependency untuk mencegah file lock.
-- Auto-detect nama app PM2 dari folder project saat ini.
-- Jika Python tidak tersedia, skrip akan fallback ke mode no-python dan menyiapkan `yt-dlp.exe` standalone otomatis.
-- Restart app PM2 lalu simpan state PM2.
-
-Catatan shortcut:
-- `update-now.ps1` adalah wrapper yang memanggil `update-bot.ps1` dengan default yang praktis.
-- AutoStash otomatis aktif saat pakai wrapper ini.
-
-Parameter opsional:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -ShowLogs
-powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app -ShowLogs
-```
-
-- `-AppName` untuk paksa nama app PM2 tertentu.
-- `-ShowLogs` untuk menampilkan log PM2 setelah restart.
-- `-SkipNpm` untuk lewati instal dependency (hanya jika dependency sudah terpasang).
-- `-ForceNpm` untuk paksa instal dependency.
-- `-NoAutoStash` untuk menonaktifkan auto stash.
-
-Mode lanjutan (kontrol penuh):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
-```
 
 ## 📜 Perintah Tersedia
 
