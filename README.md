@@ -57,6 +57,7 @@ What this script does:
 - Installs production dependencies only when needed (or when forced).
 - Stops the PM2 app temporarily before dependency install to avoid file locks.
 - Auto-detects the PM2 app from the current project folder.
+- If Python is unavailable, it falls back to no-python install mode and prepares standalone `yt-dlp.exe` automatically.
 - Restarts PM2 app and saves PM2 state.
 
 Shortcut note:
@@ -151,6 +152,7 @@ Yang dilakukan skrip:
 - Instal dependency produksi hanya saat perlu (atau saat dipaksa).
 - Stop app PM2 sementara sebelum instal dependency untuk mencegah file lock.
 - Auto-detect nama app PM2 dari folder project saat ini.
+- Jika Python tidak tersedia, skrip akan fallback ke mode no-python dan menyiapkan `yt-dlp.exe` standalone otomatis.
 - Restart app PM2 lalu simpan state PM2.
 
 Catatan shortcut:

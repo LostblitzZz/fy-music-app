@@ -172,6 +172,61 @@ process.stdout.write(JSON.stringify(simplified));
         }
 }
 
+function Ensure-YtdlpBinary {
+    param(
+        [string]$ProjectDir
+    )
+
+    $isWindows = $env:OS -eq "Windows_NT"
+    $binDir = Join-Path $ProjectDir "node_modules\yt-dlp-exec\bin"
+    $binaryName = if ($isWindows) { "yt-dlp.exe" } else { "yt-dlp" }
+    $binaryPath = Join-Path $binDir $binaryName
+
+    if (Test-Path $binaryPath) {
+        Write-Host "yt-dlp binary tersedia: $binaryPath" -ForegroundColor Green
+        return $binaryPath
+    }
+
+    if (-not (Test-Path (Join-Path $ProjectDir "node_modules\yt-dlp-exec"))) {
+        throw "Paket yt-dlp-exec tidak ditemukan setelah install dependency."
+    }
+
+    New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+    $downloadUrl = if ($isWindows) {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    }
+    else {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+    }
+
+    Write-Host "Mengunduh yt-dlp standalone dari GitHub release..." -ForegroundColor Cyan
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    }
+    catch {}
+
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $binaryPath -UseBasicParsing
+    }
+    catch {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $binaryPath
+    }
+
+    if (-not (Test-Path $binaryPath)) {
+        throw "Gagal mengunduh yt-dlp standalone."
+    }
+
+    if (-not $isWindows) {
+        try {
+            & chmod +x $binaryPath
+        }
+        catch {}
+    }
+
+    Write-Host "yt-dlp binary siap: $binaryPath" -ForegroundColor Green
+    return $binaryPath
+}
+
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "Git tidak ditemukan. Install Git terlebih dahulu."
 }
@@ -272,15 +327,7 @@ if ($shouldRunNpm -and $pm2WasOnline) {
 }
 
 if ($shouldRunNpm) {
-    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-        if ($pm2WasOnline) {
-            Write-Host "`nPython tidak ditemukan. Mencoba menyalakan kembali app PM2..." -ForegroundColor Yellow
-            & pm2 restart $resolvedAppName --update-env | Out-Null
-        }
-
-        throw "Python tidak ditemukan di PATH. Dependency yt-dlp-exec membutuhkan perintah 'python'. Install Python lalu ulangi update (atau jalankan dengan -SkipNpm jika dependency tidak berubah)."
-    }
-
+    $pythonAvailable = $null -ne (Get-Command python -ErrorAction SilentlyContinue)
     $installArgs = @("install", "--omit=dev")
     $installLabel = "Install dependency produksi (npm install)"
     if (Test-Path ".\\package-lock.json") {
@@ -288,8 +335,20 @@ if ($shouldRunNpm) {
         $installLabel = "Install dependency produksi (npm ci)"
     }
 
+    $noPythonMode = $false
+    if (-not $pythonAvailable) {
+        $noPythonMode = $true
+        $installArgs += "--ignore-scripts"
+        $installLabel = "$installLabel [no-python mode]"
+        Write-Host "Python tidak ditemukan. Pakai mode no-python (npm --ignore-scripts)." -ForegroundColor Yellow
+    }
+
     try {
         Invoke-Step -Label $installLabel -Command "npm" -Arguments $installArgs
+
+        if ($noPythonMode) {
+            Ensure-YtdlpBinary -ProjectDir $scriptDir | Out-Null
+        }
     }
     catch {
         $rawErrorText = $_.Exception.Message
@@ -331,6 +390,10 @@ if ($shouldRunNpm) {
 
             try {
                 Invoke-Step -Label "Install dependency produksi ulang (recovery)" -Command "npm" -Arguments $installArgs
+
+                if ($noPythonMode) {
+                    Ensure-YtdlpBinary -ProjectDir $scriptDir | Out-Null
+                }
             }
             catch {
                 if ($pm2WasOnline) {
