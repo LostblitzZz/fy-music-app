@@ -1743,10 +1743,7 @@ client.on('interactionCreate', async (interaction) => {
       };
 
       try {
-        const tracks = await Promise.race([
-          playShim.search(query, { limit: 8 }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2200)),
-        ]);
+        const tracks = await playShim.search(query, { limit: 8, timeoutMs: 2800 });
         const choices = (Array.isArray(tracks) ? tracks : []).slice(0, 5).map((item) => ({
           name: `${item && item.title ? item.title : 'Unknown'}${item && item.author ? ` — ${item.author}` : ''}`.substring(0, 100),
           value: String((item && (item.url || item.title)) || 'none').substring(0, 100),

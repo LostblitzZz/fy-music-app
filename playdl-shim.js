@@ -78,7 +78,7 @@ function getFilterForAudioPreset(preset) {
 }
 
 // Run yt-dlp with --dump-single-json and return parsed JSON
-async function runYtdlpJson(target, extra = {}) {
+async function runYtdlpJson(target, extra = {}, runtime = {}) {
   // Merge defaults with extras, but remove any explicit `false` flags because
   // the underlying yt-dlp wrapper converts boolean keys to CLI flags and
   // passing `false` can produce invalid double-negated options (e.g. --no-no-playlist).
@@ -94,12 +94,30 @@ async function runYtdlpJson(target, extra = {}) {
     if (merged[k] === false) continue; // skip false flags
     opts[k] = merged[k];
   }
+  const timeoutMs = Number(runtime && runtime.timeoutMs) || 0;
+  const execOpts = {
+    windowsHide: true,
+    maxBuffer: 12 * 1024 * 1024,
+  };
+
+  if (timeoutMs > 0) {
+    execOpts.timeout = timeoutMs;
+    execOpts.killSignal = 'SIGKILL';
+  }
+
   try {
-    const out = await ytdlp(target, opts);
-    if (!out) return null;
-    if (typeof out === 'string') return JSON.parse(out);
-    return out;
+    const out = await ytdlp.exec(target, opts, execOpts);
+    const stdout = out && out.stdout ? out.stdout : '';
+    if (!stdout) return null;
+    if (typeof stdout === 'string') return JSON.parse(stdout);
+    return stdout;
   } catch (err) {
+    if (err && err.timedOut) {
+      const timeoutErr = new Error('timeout');
+      timeoutErr.code = 'YTDLP_TIMEOUT';
+      throw timeoutErr;
+    }
+
     // yt-dlp sometimes writes JSON to stdout even on non-zero exit
     if (err && err.stdout) {
       try {
@@ -159,83 +177,6 @@ function isLikelyMusicEntry(entry) {
   return false;
 }
 
-const NON_MUSIC_PATTERN = /\b(recipe|resep|masak|cooking|tutorial|review|reaction|prank|challenge|podcast|interview|news|berita|vlog|gaming|gameplay|minecraft|roblox|fortnite|trailer|episode|film|movie|mr\.?\s*beast|shorts?)\b/i;
-const MUSIC_HINT_PATTERN = /\b(song|music|audio|lyrics?|lagu|musik|ost|topic|vevo)\b/i;
-
-function normalizeText(input) {
-  return String(input || '')
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function tokenizeText(input) {
-  return normalizeText(input)
-    .split(' ')
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 3);
-}
-
-function scoreMusicEntry(entry, query) {
-  const title = String(entry && entry.title || '');
-  const channel = String(entry && (entry.channel || entry.uploader) || '');
-  const fullText = `${title} ${channel}`;
-  const lowerText = fullText.toLowerCase();
-  const queryTokens = tokenizeText(query);
-  const musicHinted = isLikelyMusicEntry(entry) || MUSIC_HINT_PATTERN.test(lowerText);
-
-  let score = 0;
-
-  if (isLikelyMusicEntry(entry)) score += 8;
-  if (MUSIC_HINT_PATTERN.test(lowerText)) score += 2;
-  if (!musicHinted) score -= 4;
-  if (/(?:\s-\s*topic\b)|\bvevo\b/i.test(channel)) score += 4;
-
-  const duration = Number(entry && entry.duration) || 0;
-  if (duration > 0 && duration < 45) score -= 5;
-  else if (duration >= 45 && duration <= 900) score += 2;
-  else if (duration > 1800) score -= 3;
-
-  if (NON_MUSIC_PATTERN.test(lowerText)) score -= 8;
-
-  for (const token of queryTokens) {
-    if (token.length < 3) continue;
-    if (normalizeText(title).includes(token)) score += 1.8;
-    else if (normalizeText(channel).includes(token)) score += 0.6;
-  }
-
-  return {
-    score,
-    musicHinted,
-  };
-}
-
-function filterAndRankMusicEntries(entries, query, limit) {
-  const scored = (entries || [])
-    .map((entry) => {
-      const scoredEntry = scoreMusicEntry(entry, query);
-      return {
-        entry,
-        score: scoredEntry.score,
-        musicHinted: scoredEntry.musicHinted,
-      };
-    })
-    .sort((a, b) => b.score - a.score);
-
-  if (scored.length === 0) return [];
-
-  const hintedPool = scored.filter((item) => item.musicHinted);
-  const pool = hintedPool.length > 0 ? hintedPool : scored;
-  const strong = pool.filter((item) => item.score >= 2).map((item) => item.entry);
-  const fallback = pool.map((item) => item.entry);
-  const picked = strong.length > 0 ? strong : fallback;
-
-  return picked.slice(0, Math.max(1, limit));
-}
-
 function makeEntryKey(entry) {
   if (!entry) return null;
   const id = String(entry.id || '').trim();
@@ -248,6 +189,22 @@ function makeEntryKey(entry) {
   return `meta:${title}|${channel}`.toLowerCase();
 }
 
+function dedupeEntries(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+  const seen = new Set();
+  const out = [];
+
+  for (const entry of entries) {
+    if (!entry) continue;
+    const key = makeEntryKey(entry);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(entry);
+  }
+
+  return out;
+}
+
 // Keep music-like items first but never hide other potentially valid results.
 function prioritizeLikelyMusicEntries(entries) {
   if (!Array.isArray(entries) || entries.length === 0) return [];
@@ -258,6 +215,23 @@ function prioritizeLikelyMusicEntries(entries) {
 
 const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || 'youtube:player_client=web,web_safari,mweb';
 const YTDLP_JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES || 'node';
+const YTDLP_SEARCH_EXTRACTOR_ARGS = process.env.YTDLP_SEARCH_EXTRACTOR_ARGS || 'youtube:player_client=web_music';
+
+const SEARCH_CACHE_TTL_MS = Math.max(3000, Number(process.env.SEARCH_CACHE_TTL_MS) || 12000);
+const SEARCH_CACHE_MAX_SIZE = Math.max(25, Number(process.env.SEARCH_CACHE_MAX_SIZE) || 150);
+const searchCache = new Map();
+const searchInFlight = new Map();
+
+function pruneSearchCache(now = Date.now()) {
+  for (const [k, v] of searchCache.entries()) {
+    if (!v || Number(v.expiresAt) <= now) searchCache.delete(k);
+  }
+
+  if (searchCache.size <= SEARCH_CACHE_MAX_SIZE) return;
+  const overflow = searchCache.size - SEARCH_CACHE_MAX_SIZE;
+  const keys = Array.from(searchCache.keys()).slice(0, overflow);
+  for (const key of keys) searchCache.delete(key);
+}
 
 function tailProcessError(stderrChunks) {
   const text = Buffer.concat(stderrChunks || []).toString('utf8').trim();
@@ -266,6 +240,38 @@ function tailProcessError(stderrChunks) {
   return lines.slice(-3).join(' | ');
 }
 
+const activeChildProcesses = new Set();
+
+function trackChildProcess(proc) {
+  if (!proc || typeof proc.kill !== 'function') return;
+  activeChildProcesses.add(proc);
+  const cleanup = () => activeChildProcesses.delete(proc);
+  proc.once('close', cleanup);
+  proc.once('exit', cleanup);
+}
+
+function cleanupChildProcesses() {
+  for (const proc of Array.from(activeChildProcesses)) {
+    try {
+      if (proc && !proc.killed) proc.kill('SIGKILL');
+    } catch (e) {}
+    activeChildProcesses.delete(proc);
+  }
+}
+
+let cleanupHookBound = false;
+function bindCleanupHooks() {
+  if (cleanupHookBound) return;
+  cleanupHookBound = true;
+
+  process.once('SIGINT', cleanupChildProcesses);
+  process.once('SIGTERM', cleanupChildProcesses);
+  process.once('beforeExit', cleanupChildProcesses);
+  process.once('exit', cleanupChildProcesses);
+}
+
+bindCleanupHooks();
+
 module.exports = {
   /**
    * Search YouTube for tracks.
@@ -273,55 +279,71 @@ module.exports = {
    * @param {{ limit?: number }} opts
    * @returns {Promise<Array<{title: string, url: string}>>}
    */
-  search: async (query, { limit = 5 } = {}) => {
+  search: async (query, { limit = 5, timeoutMs = 2800 } = {}) => {
+    const normalizedQuery = String(query || '').trim();
+    if (!normalizedQuery) return [];
+
+    const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
+    const safeTimeoutMs = Math.max(900, Number(timeoutMs) || 2800);
+    const cacheKey = `${normalizedQuery.toLowerCase()}::${safeLimit}`;
+
     try {
-      if (!query) return [];
-      const normalizedQuery = String(query).trim();
-      const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
-      const fetchLimit = Math.max(12, safeLimit * 4);
-
-      const searchQueries = [normalizedQuery];
-      if (!MUSIC_HINT_PATTERN.test(normalizedQuery)) {
-        searchQueries.push(`${normalizedQuery} official audio`);
+      const now = Date.now();
+      const cached = searchCache.get(cacheKey);
+      if (cached && Number(cached.expiresAt) > now && Array.isArray(cached.results)) {
+        return cached.results.slice(0, safeLimit);
       }
 
-      const mergedEntries = [];
-      const seen = new Set();
-
-      for (const q of searchQueries) {
-        try {
-          const target = `ytsearch${fetchLimit}:${q}`;
-          const info = await runYtdlpJson(target, { noPlaylist: true });
-          if (!info) continue;
-
-          const entries = info.entries || (info.id ? [info] : []);
-          for (const entry of entries) {
-            const key = makeEntryKey(entry);
-            if (key && seen.has(key)) continue;
-            if (key) seen.add(key);
-            mergedEntries.push(entry);
-          }
-        } catch (e) {
-          // Continue with other fallback queries.
-        }
+      if (searchInFlight.has(cacheKey)) {
+        const shared = await searchInFlight.get(cacheKey);
+        return Array.isArray(shared) ? shared.slice(0, safeLimit) : [];
       }
 
-      const sourceEntries = filterAndRankMusicEntries(
-        prioritizeLikelyMusicEntries(mergedEntries),
-        normalizedQuery,
-        safeLimit
-      );
+      const loader = (async () => {
+        const fetchLimit = Math.max(8, Math.min(25, safeLimit * 2));
+        const target = `ytsearch${fetchLimit}:${normalizedQuery}`;
+        const info = await runYtdlpJson(
+          target,
+          {
+            noPlaylist: true,
+            flatPlaylist: true,
+            extractorArgs: YTDLP_SEARCH_EXTRACTOR_ARGS,
+          },
+          { timeoutMs: safeTimeoutMs }
+        );
 
-      return sourceEntries.map(e => ({
-        title:    (e && e.title) ? e.title : 'Unknown Title',
-        url:      (e && (e.webpage_url || e.url)) ? toMusicYouTubeUrl(e.webpage_url || e.url) : '',
-        duration: (e && e.duration) ? parseInt(e.duration) : 0,
-        thumbnail: (e && e.thumbnail) ? e.thumbnail : (e && e.thumbnails && e.thumbnails[0] ? e.thumbnails[0].url : ''),
-        author:   (e && (e.uploader || e.channel)) ? (e.uploader || e.channel) : 'Unknown Artist',
-      }));
+        if (!info) return [];
+
+        const entries = dedupeEntries(info.entries || (info.id ? [info] : []))
+          .slice(0, safeLimit);
+
+        return entries.map((e) => ({
+          title: (e && e.title) ? e.title : 'Unknown Title',
+          url: (e && (e.webpage_url || e.url)) ? toMusicYouTubeUrl(e.webpage_url || e.url) : '',
+          duration: (e && e.duration) ? parseInt(e.duration, 10) : 0,
+          thumbnail: (e && e.thumbnail) ? e.thumbnail : (e && e.thumbnails && e.thumbnails[0] ? e.thumbnails[0].url : ''),
+          author: (e && (e.uploader || e.channel)) ? (e.uploader || e.channel) : 'Unknown Artist',
+        }));
+      })();
+
+      searchInFlight.set(cacheKey, loader);
+      const results = await loader;
+
+      searchCache.set(cacheKey, {
+        expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+        results: Array.isArray(results) ? results : [],
+      });
+      pruneSearchCache();
+
+      return Array.isArray(results) ? results.slice(0, safeLimit) : [];
     } catch (err) {
-      console.warn('[playdl-shim] search failed:', err && err.message ? err.message : err);
+      const msg = err && err.message ? err.message : String(err);
+      if (msg !== 'timeout') {
+        console.warn('[playdl-shim] search failed:', msg);
+      }
       return [];
+    } finally {
+      searchInFlight.delete(cacheKey);
     }
   },
 
@@ -359,6 +381,7 @@ module.exports = {
 
         console.log('[playdl-shim] spawning yt-dlp for:', spawnTarget);
         const proc = spawn(ytdlpPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        trackChildProcess(proc);
 
         if (!proc) return reject(new Error('Failed to spawn yt-dlp process'));
         if (!proc.stdout) {
@@ -453,6 +476,7 @@ module.exports = {
         }
 
         const ffmpegProc = spawn(ffmpegPath, ffmpegArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+        trackChildProcess(ffmpegProc);
         if (!ffmpegProc || !ffmpegProc.stdout || !ffmpegProc.stdin) {
           try { proc.kill('SIGKILL'); } catch (e) {}
           try { if (ffmpegProc) ffmpegProc.kill('SIGKILL'); } catch (e) {}
