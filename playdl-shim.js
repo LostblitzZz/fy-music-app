@@ -133,6 +133,14 @@ function isYouTubeLike(input) {
   return /youtube\.com|youtu\.be|music\.youtube\.com/.test(text);
 }
 
+function normalizePlayableTarget(input) {
+  const value = String(input || '');
+  if (!value) return value;
+  if (!isUrl(value)) return value;
+  if (isYouTubeLike(value)) return toMusicYouTubeUrl(value);
+  return value;
+}
+
 function isLikelyMusicEntry(entry) {
   if (!entry) return false;
 
@@ -210,7 +218,9 @@ module.exports = {
       try {
         if (!target) return reject(new Error('No target provided to stream()'));
 
-        const spawnTarget = isUrl(target) ? String(target) : `ytsearch1:${String(target)}`;
+        const spawnTarget = isUrl(target)
+          ? normalizePlayableTarget(target)
+          : `ytsearch1:${String(target)}`;
         const selectedPreset = normalizeAudioPreset(opts && opts.audioPreset);
         const audioFilter = getFilterForAudioPreset(selectedPreset);
         const startAtSeconds = Math.max(0, Number(opts && opts.startAtSeconds) || 0);
@@ -434,7 +444,8 @@ module.exports = {
    */
   getInfo: async (url) => {
     try {
-      const info = await runYtdlpJson(url, { noPlaylist: true });
+      const lookupTarget = normalizePlayableTarget(url);
+      const info = await runYtdlpJson(lookupTarget, { noPlaylist: true });
       if (!info) return null;
 
       const resolvedUrl = info.webpage_url || info.url || url;
