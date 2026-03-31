@@ -156,15 +156,6 @@ if ($dirty) {
 Invoke-Step -Label "Ambil update terbaru dari remote" -Command "git" -Arguments @("fetch", $Remote, "--prune")
 Invoke-Step -Label "Tarik update branch terbaru (fast-forward only)" -Command "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
 
-if (-not $SkipNpm) {
-    if (Test-Path ".\\package-lock.json") {
-        Invoke-Step -Label "Install dependency produksi (npm ci)" -Command "npm" -Arguments @("ci", "--omit=dev")
-    }
-    else {
-        Invoke-Step -Label "Install dependency produksi (npm install)" -Command "npm" -Arguments @("install", "--omit=dev")
-    }
-}
-
 $pm2Json = (& pm2 jlist 2>$null | Out-String)
 if (-not $pm2Json.Trim()) {
     throw "Gagal membaca daftar proses PM2."
@@ -176,6 +167,33 @@ if ($pm2Apps.Count -eq 0) {
 }
 
 $resolvedAppName = Resolve-Pm2AppName -Apps $pm2Apps -RequestedName $AppName -ProjectDir $scriptDir
+$targetPm2App = $pm2Apps | Where-Object { $_.name -ieq $resolvedAppName } | Select-Object -First 1
+$pm2WasOnline = $false
+if ($targetPm2App -and $targetPm2App.pm2_env.status -eq "online") {
+    $pm2WasOnline = $true
+}
+
+if (-not $SkipNpm -and $pm2WasOnline) {
+    Invoke-Step -Label "Stop proses PM2 '$resolvedAppName' sementara (hindari file lock saat npm)" -Command "pm2" -Arguments @("stop", $resolvedAppName)
+}
+
+if (-not $SkipNpm) {
+    try {
+        if (Test-Path ".\\package-lock.json") {
+            Invoke-Step -Label "Install dependency produksi (npm ci)" -Command "npm" -Arguments @("ci", "--omit=dev")
+        }
+        else {
+            Invoke-Step -Label "Install dependency produksi (npm install)" -Command "npm" -Arguments @("install", "--omit=dev")
+        }
+    }
+    catch {
+        if ($pm2WasOnline) {
+            Write-Host "`nInstall dependency gagal. Mencoba menyalakan kembali app PM2..." -ForegroundColor Yellow
+            & pm2 restart $resolvedAppName --update-env | Out-Null
+        }
+        throw
+    }
+}
 
 Invoke-Step -Label "Restart proses PM2 '$resolvedAppName'" -Command "pm2" -Arguments @("restart", $resolvedAppName, "--update-env")
 Invoke-Step -Label "Simpan konfigurasi PM2" -Command "pm2" -Arguments @("save")

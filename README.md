@@ -54,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1
 
 What this script does:
 - Pulls the newest code from GitHub.
-- Installs production dependencies.
+- Stops the PM2 app temporarily, then installs production dependencies.
 - Auto-detects the PM2 app from the current project folder.
 - Restarts PM2 app and saves PM2 state.
 
@@ -146,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1
 
 Yang dilakukan skrip:
 - Tarik kode terbaru dari GitHub.
-- Instal dependency produksi.
+- Stop app PM2 sementara, lalu instal dependency produksi.
 - Auto-detect nama app PM2 dari folder project saat ini.
 - Restart app PM2 lalu simpan state PM2.
 
