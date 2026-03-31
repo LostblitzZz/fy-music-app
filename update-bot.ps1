@@ -116,6 +116,61 @@ function Resolve-Pm2AppName {
     throw "Tidak bisa auto-detect PM2 app. Jalankan dengan parameter -AppName."
 }
 
+function Get-Pm2AppsSnapshot {
+        $nodeScript = @"
+const { execSync } = require('child_process');
+
+function safeString(value) {
+    if (value === null || value === undefined) return '';
+    return String(value);
+}
+
+let raw;
+try {
+    raw = execSync('pm2 jlist', { encoding: 'utf8' });
+} catch (err) {
+    const stderr = err && err.stderr ? String(err.stderr) : '';
+    const message = stderr || (err && err.message ? String(err.message) : 'pm2 jlist failed');
+    console.error(message.trim());
+    process.exit(1);
+}
+
+let parsed;
+try {
+    parsed = JSON.parse(raw);
+} catch (err) {
+    console.error('Invalid JSON from pm2 jlist: ' + (err && err.message ? err.message : err));
+    process.exit(1);
+}
+
+const simplified = (Array.isArray(parsed) ? parsed : []).map((app) => {
+    const env = app && app.pm2_env ? app.pm2_env : {};
+    return {
+        name: safeString(app && app.name),
+        pm2_env: {
+            status: safeString(env.status),
+            pm_cwd: safeString(env.pm_cwd),
+            pm_exec_path: safeString(env.pm_exec_path)
+        }
+    };
+});
+
+process.stdout.write(JSON.stringify(simplified));
+"@
+
+        $pm2SnapshotJson = & node -e $nodeScript
+        if ($LASTEXITCODE -ne 0 -or -not $pm2SnapshotJson) {
+                throw "Gagal membaca daftar proses PM2."
+        }
+
+        try {
+                return @($pm2SnapshotJson | ConvertFrom-Json)
+        }
+        catch {
+                throw "Gagal memproses data PM2 snapshot."
+        }
+}
+
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "Git tidak ditemukan. Install Git terlebih dahulu."
 }
@@ -156,12 +211,7 @@ if ($dirty) {
 Invoke-Step -Label "Ambil update terbaru dari remote" -Command "git" -Arguments @("fetch", $Remote, "--prune")
 Invoke-Step -Label "Tarik update branch terbaru (fast-forward only)" -Command "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
 
-$pm2Json = (& pm2 jlist 2>$null | Out-String)
-if (-not $pm2Json.Trim()) {
-    throw "Gagal membaca daftar proses PM2."
-}
-
-$pm2Apps = @($pm2Json | ConvertFrom-Json)
+$pm2Apps = Get-Pm2AppsSnapshot
 if ($pm2Apps.Count -eq 0) {
     throw "Belum ada proses PM2 terdaftar. Jalankan bot dulu dengan pm2 start index.js --name fy-music-app"
 }
