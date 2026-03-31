@@ -1732,24 +1732,32 @@ client.on('interactionCreate', async (interaction) => {
   // ── Autocomplete ────────────────────────────────────────────────────────────
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === 'play') {
-      const query = interaction.options.getFocused();
-      if (!query || String(query).length < 2) {
+      const query = String(interaction.options.getFocused() || '').trim();
+      if (!query || query.length < 2) {
         return interaction.respond([{ name: 'Ketik minimal 2 huruf...', value: 'none' }]).catch(() => {});
       }
+
+      const manualChoice = {
+        name: `Cari: ${query}`.substring(0, 100),
+        value: query.substring(0, 100),
+      };
+
       try {
         const tracks = await Promise.race([
-          playShim.search(String(query), { limit: 8 }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
+          playShim.search(query, { limit: 8 }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2200)),
         ]);
         const choices = (Array.isArray(tracks) ? tracks : []).slice(0, 5).map((item) => ({
           name: `${item && item.title ? item.title : 'Unknown'}${item && item.author ? ` — ${item.author}` : ''}`.substring(0, 100),
           value: String((item && (item.url || item.title)) || 'none').substring(0, 100),
         }));
-        await interaction.respond(choices.length ? choices : [{ name: 'Tidak ditemukan', value: 'none' }]).catch(() => {});
+
+        const payload = choices.length ? choices : [manualChoice];
+        await interaction.respond(payload.slice(0, 25)).catch(() => {});
       } catch (err) {
         const msg = err && err.message ? err.message : String(err);
         if (msg !== 'timeout') console.error('[bot] Autocomplete error:', msg);
-        await interaction.respond([{ name: 'Timeout / error', value: 'none' }]).catch(() => {});
+        await interaction.respond([manualChoice]).catch(() => {});
       }
     }
     return;
