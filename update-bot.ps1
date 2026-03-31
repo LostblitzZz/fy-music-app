@@ -250,6 +250,35 @@ function Test-RequiredDependenciesInstalled {
     return $true
 }
 
+function Test-PythonUsable {
+    try {
+        $pythonOutput = & python --version 2>&1
+        $exitCode = $LASTEXITCODE
+        $text = ($pythonOutput | Out-String).Trim()
+
+        if ($exitCode -ne 0) {
+            return $false
+        }
+
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return $false
+        }
+
+        if ($text -match "was not found" -or $text -match "Microsoft Store") {
+            return $false
+        }
+
+        if ($text -match "Python\s+\d+") {
+            return $true
+        }
+
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "Git tidak ditemukan. Install Git terlebih dahulu."
 }
@@ -358,7 +387,7 @@ if ($shouldRunNpm -and $pm2WasOnline) {
 }
 
 if ($shouldRunNpm) {
-    $pythonAvailable = $null -ne (Get-Command python -ErrorAction SilentlyContinue)
+    $pythonAvailable = Test-PythonUsable
     $installArgs = @("install", "--omit=dev")
     $installLabel = "Install dependency produksi (npm install)"
     if (Test-Path ".\\package-lock.json") {
