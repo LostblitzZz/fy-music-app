@@ -20,6 +20,7 @@ param(
     [string]$AppName,
     [switch]$AutoStash,
     [switch]$SkipNpm,
+    [switch]$ForceNpm,
     [switch]$ShowLogs
 )
 
@@ -208,8 +209,51 @@ if ($dirty) {
     }
 }
 
+$beforePullHead = (& git rev-parse HEAD 2>$null | Out-String).Trim()
+
 Invoke-Step -Label "Ambil update terbaru dari remote" -Command "git" -Arguments @("fetch", $Remote, "--prune")
 Invoke-Step -Label "Tarik update branch terbaru (fast-forward only)" -Command "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
+
+$afterPullHead = (& git rev-parse HEAD 2>$null | Out-String).Trim()
+$depsChangedOnUpdate = $false
+if ($beforePullHead -and $afterPullHead -and $beforePullHead -ne $afterPullHead) {
+    $depDiff = (& git diff --name-only $beforePullHead $afterPullHead -- package.json package-lock.json 2>$null | Out-String).Trim()
+    if ($depDiff) {
+        $depsChangedOnUpdate = $true
+    }
+}
+
+$nodeModulesExists = Test-Path ".\\node_modules"
+$shouldRunNpm = $false
+$npmDecisionReason = ""
+
+if ($SkipNpm) {
+    $shouldRunNpm = $false
+    $npmDecisionReason = "SkipNpm aktif"
+}
+elseif ($ForceNpm) {
+    $shouldRunNpm = $true
+    $npmDecisionReason = "ForceNpm aktif"
+}
+elseif (-not $nodeModulesExists) {
+    $shouldRunNpm = $true
+    $npmDecisionReason = "node_modules belum ada"
+}
+elseif ($depsChangedOnUpdate) {
+    $shouldRunNpm = $true
+    $npmDecisionReason = "package.json/package-lock.json berubah"
+}
+else {
+    $shouldRunNpm = $false
+    $npmDecisionReason = "dependency tidak berubah"
+}
+
+if ($shouldRunNpm) {
+    Write-Host "Install dependency: ya ($npmDecisionReason)" -ForegroundColor Cyan
+}
+else {
+    Write-Host "Install dependency: lewati ($npmDecisionReason)" -ForegroundColor Cyan
+}
 
 $pm2Apps = Get-Pm2AppsSnapshot
 if ($pm2Apps.Count -eq 0) {
@@ -223,11 +267,20 @@ if ($targetPm2App -and $targetPm2App.pm2_env.status -eq "online") {
     $pm2WasOnline = $true
 }
 
-if (-not $SkipNpm -and $pm2WasOnline) {
+if ($shouldRunNpm -and $pm2WasOnline) {
     Invoke-Step -Label "Stop proses PM2 '$resolvedAppName' sementara (hindari file lock saat npm)" -Command "pm2" -Arguments @("stop", $resolvedAppName)
 }
 
-if (-not $SkipNpm) {
+if ($shouldRunNpm) {
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        if ($pm2WasOnline) {
+            Write-Host "`nPython tidak ditemukan. Mencoba menyalakan kembali app PM2..." -ForegroundColor Yellow
+            & pm2 restart $resolvedAppName --update-env | Out-Null
+        }
+
+        throw "Python tidak ditemukan di PATH. Dependency yt-dlp-exec membutuhkan perintah 'python'. Install Python lalu ulangi update (atau jalankan dengan -SkipNpm jika dependency tidak berubah)."
+    }
+
     $installArgs = @("install", "--omit=dev")
     $installLabel = "Install dependency produksi (npm install)"
     if (Test-Path ".\\package-lock.json") {

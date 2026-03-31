@@ -54,7 +54,8 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1
 
 What this script does:
 - Pulls the newest code from GitHub.
-- Stops the PM2 app temporarily, then installs production dependencies.
+- Installs production dependencies only when needed (or when forced).
+- Stops the PM2 app temporarily before dependency install to avoid file locks.
 - Auto-detects the PM2 app from the current project folder.
 - Restarts PM2 app and saves PM2 state.
 
@@ -72,6 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app 
 - `-AppName` to force a specific PM2 app name.
 - `-ShowLogs` to show latest PM2 logs after restart.
 - `-SkipNpm` to skip dependency installation.
+- `-ForceNpm` to force dependency installation.
 - `-NoAutoStash` to disable auto stash.
 
 Advanced mode (full control):
@@ -146,7 +148,8 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1
 
 Yang dilakukan skrip:
 - Tarik kode terbaru dari GitHub.
-- Stop app PM2 sementara, lalu instal dependency produksi.
+- Instal dependency produksi hanya saat perlu (atau saat dipaksa).
+- Stop app PM2 sementara sebelum instal dependency untuk mencegah file lock.
 - Auto-detect nama app PM2 dari folder project saat ini.
 - Restart app PM2 lalu simpan state PM2.
 
@@ -164,6 +167,7 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app 
 - `-AppName` untuk paksa nama app PM2 tertentu.
 - `-ShowLogs` untuk menampilkan log PM2 setelah restart.
 - `-SkipNpm` untuk lewati instal dependency.
+- `-ForceNpm` untuk paksa instal dependency.
 - `-NoAutoStash` untuk menonaktifkan auto stash.
 
 Mode lanjutan (kontrol penuh):

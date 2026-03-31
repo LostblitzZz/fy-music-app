@@ -16,6 +16,7 @@ di laptop lain cukup jalankan satu command.
 param(
     [switch]$ShowLogs,
     [switch]$SkipNpm,
+    [switch]$ForceNpm,
     [string]$AppName,
     [string]$Remote = "origin",
     [string]$Branch = "master",
@@ -47,6 +48,10 @@ if (-not $NoAutoStash) {
 
 if ($SkipNpm) {
     $args += "-SkipNpm"
+}
+
+if ($ForceNpm) {
+    $args += "-ForceNpm"
 }
 
 if ($ShowLogs) {
