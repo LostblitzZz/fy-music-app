@@ -396,9 +396,35 @@ class MusicPlayer extends EventEmitter {
         oldState.status !== AudioPlayerStatus.Idle &&
         newState.status === AudioPlayerStatus.Idle
       ) {
+        const s = this.guilds.get(guildId);
+        const playbackMs = Number(s && s.resource && s.resource.playbackDuration) || 0;
+        const hasActiveProcess = !!(s && s.currentProcess && !s.currentProcess.killed);
+        const stallRetryCount = Number(s && s.playing && s.playing._stallRetryCount) || 0;
+
+        if (
+          s &&
+          s.playing &&
+          hasActiveProcess &&
+          playbackMs >= 1500 &&
+          playbackMs <= 18000 &&
+          stallRetryCount < 1
+        ) {
+          const retryTrack = { ...s.playing, _stallRetryCount: stallRetryCount + 1 };
+          const resumeAt = Math.max(0, Math.floor(playbackMs / 1000) - 1);
+          if (resumeAt > 0) retryTrack.resumeAt = resumeAt;
+
+          console.warn(`[player] early idle detected (${playbackMs}ms) while stream is alive; retrying current track once`);
+
+          this._killProcess(guildId);
+          s.playing = null;
+          s.resource = null;
+          s.queue.unshift(retryTrack);
+          setImmediate(() => this._playNext(guildId));
+          return;
+        }
+
         // Track ended — record it to lastPlayed to avoid radio repeat
         try {
-          const s = this.guilds.get(guildId);
           if (s && s.playing) {
             this._rememberPlayed(s, s.playing);
           }

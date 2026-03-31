@@ -146,6 +146,12 @@ function toMusicYouTubeUrl(url) {
   return `https://music.youtube.com/watch?v=${id}`;
 }
 
+function toWatchYouTubeUrl(url) {
+  const id = extractYouTubeVideoId(url);
+  if (!id) return String(url || '');
+  return `https://www.youtube.com/watch?v=${id}`;
+}
+
 function isYouTubeLike(input) {
   const text = String(input || '').toLowerCase();
   return /youtube\.com|youtu\.be|music\.youtube\.com/.test(text);
@@ -155,7 +161,9 @@ function normalizePlayableTarget(input) {
   const value = String(input || '');
   if (!value) return value;
   if (!isUrl(value)) return value;
-  if (isYouTubeLike(value)) return toMusicYouTubeUrl(value);
+  // Keep search/result URLs in YouTube Music for UX, but stream from watch URL
+  // to reduce throttling stalls that can cause premature idle transitions.
+  if (isYouTubeLike(value)) return toWatchYouTubeUrl(value);
   return value;
 }
 
@@ -369,11 +377,14 @@ module.exports = {
 
         // Prefer pure audio, then fall back to mp4/best if YouTube exposes limited formats.
         const args = [
-          '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best[ext=mp4]/best',
+          '-f', 'bestaudio[ext=m4a][protocol=https]/bestaudio[ext=webm][protocol=https]/bestaudio/best[ext=mp4]/best',
           '-o', '-',
           '--no-playlist',
           '--no-part',
           '--no-cache-dir',
+          '--retries', 'infinite',
+          '--fragment-retries', '25',
+          '--retry-sleep', 'fragment:exp=1:20',
           '--extractor-args', YTDLP_EXTRACTOR_ARGS,
           '--js-runtimes', YTDLP_JS_RUNTIMES,
           spawnTarget,
