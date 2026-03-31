@@ -178,20 +178,72 @@ if (-not $SkipNpm -and $pm2WasOnline) {
 }
 
 if (-not $SkipNpm) {
+    $installArgs = @("install", "--omit=dev")
+    $installLabel = "Install dependency produksi (npm install)"
+    if (Test-Path ".\\package-lock.json") {
+        $installArgs = @("ci", "--omit=dev")
+        $installLabel = "Install dependency produksi (npm ci)"
+    }
+
     try {
-        if (Test-Path ".\\package-lock.json") {
-            Invoke-Step -Label "Install dependency produksi (npm ci)" -Command "npm" -Arguments @("ci", "--omit=dev")
-        }
-        else {
-            Invoke-Step -Label "Install dependency produksi (npm install)" -Command "npm" -Arguments @("install", "--omit=dev")
-        }
+        Invoke-Step -Label $installLabel -Command "npm" -Arguments $installArgs
     }
     catch {
-        if ($pm2WasOnline) {
-            Write-Host "`nInstall dependency gagal. Mencoba menyalakan kembali app PM2..." -ForegroundColor Yellow
-            & pm2 restart $resolvedAppName --update-env | Out-Null
+        $rawErrorText = $_.Exception.Message
+        $isLockError = ($rawErrorText -match "EPERM") -or ($rawErrorText -match "EBUSY") -or ($rawErrorText -match "operation not permitted")
+
+        if ($isLockError) {
+            Write-Host "`nTerdeteksi lock file Windows saat install dependency. Menjalankan recovery otomatis..." -ForegroundColor Yellow
+
+            # Pastikan proses PM2 berhenti agar native module tidak terkunci saat reinstall.
+            & pm2 stop $resolvedAppName | Out-Null
+            Start-Sleep -Seconds 2
+
+            $escapedProjectDir = [regex]::Escape($scriptDir)
+            $projectNodeProcesses = @(
+                Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and $_.CommandLine -match $escapedProjectDir }
+            )
+
+            if ($projectNodeProcesses.Count -gt 0) {
+                Write-Host "Menutup proses node yang masih memakai folder project..." -ForegroundColor Yellow
+                foreach ($proc in $projectNodeProcesses) {
+                    try {
+                        Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+                    }
+                    catch {
+                        # Lanjutkan recovery untuk proses lain.
+                    }
+                }
+                Start-Sleep -Seconds 1
+            }
+
+            if (Test-Path ".\\node_modules") {
+                Write-Host "Membersihkan node_modules untuk clean reinstall..." -ForegroundColor Yellow
+                Remove-Item ".\\node_modules" -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path ".\\node_modules") {
+                    Invoke-Step -Label "Hapus node_modules (fallback cmd)" -Command "cmd" -Arguments @("/c", "rmdir /s /q node_modules")
+                }
+            }
+
+            try {
+                Invoke-Step -Label "Install dependency produksi ulang (recovery)" -Command "npm" -Arguments $installArgs
+            }
+            catch {
+                if ($pm2WasOnline) {
+                    Write-Host "`nRecovery gagal. Mencoba menyalakan kembali app PM2..." -ForegroundColor Yellow
+                    & pm2 restart $resolvedAppName --update-env | Out-Null
+                }
+                throw
+            }
         }
-        throw
+        else {
+            if ($pm2WasOnline) {
+                Write-Host "`nInstall dependency gagal. Mencoba menyalakan kembali app PM2..." -ForegroundColor Yellow
+                & pm2 restart $resolvedAppName --update-env | Out-Null
+            }
+            throw
+        }
     }
 }
 
