@@ -4,6 +4,7 @@
 
 const ytdlp = require('yt-dlp-exec');
 const { spawn } = require('child_process');
+const { PassThrough } = require('stream');
 const fs   = require('fs');
 const path = require('path');
 
@@ -81,7 +82,13 @@ async function runYtdlpJson(target, extra = {}) {
   // Merge defaults with extras, but remove any explicit `false` flags because
   // the underlying yt-dlp wrapper converts boolean keys to CLI flags and
   // passing `false` can produce invalid double-negated options (e.g. --no-no-playlist).
-  const merged = Object.assign({ dumpSingleJson: true, noWarnings: true, noCheckCertificates: true }, extra);
+  const merged = Object.assign({
+    dumpSingleJson: true,
+    noWarnings: true,
+    noCheckCertificates: true,
+    extractorArgs: YTDLP_EXTRACTOR_ARGS,
+    jsRuntimes: YTDLP_JS_RUNTIMES,
+  }, extra);
   const opts = {};
   for (const k of Object.keys(merged)) {
     if (merged[k] === false) continue; // skip false flags
@@ -152,6 +159,16 @@ function prioritizeLikelyMusicEntries(entries) {
     .sort((a, b) => Number(isLikelyMusicEntry(b)) - Number(isLikelyMusicEntry(a)));
 }
 
+const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || 'youtube:player_client=web,web_safari,mweb';
+const YTDLP_JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES || 'node';
+
+function tailProcessError(stderrChunks) {
+  const text = Buffer.concat(stderrChunks || []).toString('utf8').trim();
+  if (!text) return '';
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.slice(-3).join(' | ');
+}
+
 module.exports = {
   /**
    * Search YouTube for tracks.
@@ -199,18 +216,20 @@ module.exports = {
         const startAtSeconds = Math.max(0, Number(opts && opts.startAtSeconds) || 0);
         const needsSeek = startAtSeconds > 0.5;
 
-        // Prefer webm/opus to avoid FFmpeg re-encoding; fall back to bestaudio
+        // Prefer pure audio, then fall back to mp4/best if YouTube exposes limited formats.
         const args = [
-          '-f', 'bestaudio[ext=webm]/bestaudio',
+          '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best[ext=mp4]/best',
           '-o', '-',
           '--no-playlist',
           '--no-part',
           '--no-cache-dir',
+          '--extractor-args', YTDLP_EXTRACTOR_ARGS,
+          '--js-runtimes', YTDLP_JS_RUNTIMES,
           spawnTarget,
         ];
 
         console.log('[playdl-shim] spawning yt-dlp for:', spawnTarget);
-        const proc = spawn(ytdlpPath, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+        const proc = spawn(ytdlpPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
         if (!proc) return reject(new Error('Failed to spawn yt-dlp process'));
         if (!proc.stdout) {
@@ -218,31 +237,70 @@ module.exports = {
           return reject(new Error('yt-dlp stdout is null'));
         }
 
-        // Flat mode without seek: pass-through yt-dlp stream (lowest CPU).
-        if (!ffmpegPath || (!audioFilter && !needsSeek)) {
-          if ((audioFilter || needsSeek) && !ffmpegPath) {
+        const ytdlpStderrChunks = [];
+        if (proc.stderr) {
+          proc.stderr.on('data', (chunk) => {
+            if (chunk) ytdlpStderrChunks.push(Buffer.from(chunk));
+          });
+        }
+
+        // Without ffmpeg we can only pass through whatever yt-dlp emits.
+        if (!ffmpegPath) {
+          if (audioFilter || needsSeek) {
             console.warn('[playdl-shim] ffmpeg unavailable; cannot apply preset/seek, using flat stream from start');
           }
+
+          const passthrough = new PassThrough();
+          let settled = false;
+          let sawData = false;
+
+          const failEarly = (reason) => {
+            if (settled) return;
+            settled = true;
+            try { passthrough.destroy(); } catch (e) {}
+            reject(new Error(reason));
+          };
+
+          proc.stdout.once('data', (firstChunk) => {
+            sawData = true;
+            if (settled) return;
+
+            settled = true;
+            passthrough.write(firstChunk);
+            proc.stdout.pipe(passthrough);
+            resolve({ stream: passthrough, type: 'webm_opus', process: proc });
+          });
+
+          proc.stdout.on('end', () => {
+            try { passthrough.end(); } catch (e) {}
+          });
 
           proc.on('error', (err) => {
             console.error('[playdl-shim] process error:', err && err.message ? err.message : err);
             if (err && err.code === 'ENOENT') {
               console.error('[playdl-shim] yt-dlp not found. Run: npm install yt-dlp-exec');
             }
+            failEarly(`yt-dlp process error: ${err && err.message ? err.message : err}`);
           });
 
           proc.on('close', (code) => {
             if (code !== 0 && code !== null) {
-              console.log(`[playdl-shim] yt-dlp exited with code ${code}`);
+              const tail = tailProcessError(ytdlpStderrChunks);
+              console.log(`[playdl-shim] yt-dlp exited with code ${code}${tail ? ` | ${tail}` : ''}`);
             } else {
               console.log('[playdl-shim] yt-dlp exited normally');
             }
+
+            if (!sawData) {
+              const tail = tailProcessError(ytdlpStderrChunks);
+              failEarly(`yt-dlp finished before audio output${tail ? `: ${tail}` : ''}`);
+            }
           });
 
-          return resolve({ stream: proc.stdout, type: 'webm_opus', process: proc });
+          return;
         }
 
-        // Preset/seek mode: run stream through ffmpeg and output raw PCM.
+        // ffmpeg mode: normalize to PCM so mp4/hls fallback formats remain playable.
         const ffmpegArgs = [
           '-hide_banner',
           '-loglevel', 'error',
@@ -265,11 +323,18 @@ module.exports = {
           ffmpegArgs.splice(ffmpegArgs.indexOf('-ar'), 0, '-af', audioFilter);
         }
 
-        const ffmpegProc = spawn(ffmpegPath, ffmpegArgs, { stdio: ['pipe', 'pipe', 'ignore'] });
+        const ffmpegProc = spawn(ffmpegPath, ffmpegArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
         if (!ffmpegProc || !ffmpegProc.stdout || !ffmpegProc.stdin) {
           try { proc.kill('SIGKILL'); } catch (e) {}
           try { if (ffmpegProc) ffmpegProc.kill('SIGKILL'); } catch (e) {}
           return reject(new Error('Failed to start ffmpeg audio filter process'));
+        }
+
+        const ffmpegStderrChunks = [];
+        if (ffmpegProc.stderr) {
+          ffmpegProc.stderr.on('data', (chunk) => {
+            if (chunk) ffmpegStderrChunks.push(Buffer.from(chunk));
+          });
         }
 
         if (audioFilter) {
@@ -278,6 +343,33 @@ module.exports = {
         if (needsSeek) {
           console.log(`[playdl-shim] seeking stream to ~${startAtSeconds.toFixed(1)}s`);
         }
+
+        const pcmStream = new PassThrough();
+        let settled = false;
+        let sawData = false;
+
+        const failEarly = (reason) => {
+          if (settled) return;
+          settled = true;
+          try { pcmStream.destroy(); } catch (e) {}
+          try { if (proc && !proc.killed) proc.kill('SIGKILL'); } catch (e) {}
+          try { if (ffmpegProc && !ffmpegProc.killed) ffmpegProc.kill('SIGKILL'); } catch (e) {}
+          reject(new Error(reason));
+        };
+
+        ffmpegProc.stdout.once('data', (firstChunk) => {
+          sawData = true;
+          if (settled) return;
+
+          settled = true;
+          pcmStream.write(firstChunk);
+          ffmpegProc.stdout.pipe(pcmStream);
+          resolve({ stream: pcmStream, type: 'raw_pcm', process: ffmpegProc });
+        });
+
+        ffmpegProc.stdout.on('end', () => {
+          try { pcmStream.end(); } catch (e) {}
+        });
 
         proc.stdout.pipe(ffmpegProc.stdin);
 
@@ -289,17 +381,34 @@ module.exports = {
 
         proc.on('error', (err) => {
           console.error('[playdl-shim] process error:', err && err.message ? err.message : err);
-          try { ffmpegProc.kill('SIGKILL'); } catch (e) {}
+          failEarly(`yt-dlp process error: ${err && err.message ? err.message : err}`);
         });
 
-        proc.on('close', () => {
+        proc.on('close', (code) => {
           try { ffmpegProc.stdin.end(); } catch (e) {}
+
+          if (code !== 0 && code !== null) {
+            const ytdlpTail = tailProcessError(ytdlpStderrChunks);
+            console.log(`[playdl-shim] yt-dlp exited with code ${code}${ytdlpTail ? ` | ${ytdlpTail}` : ''}`);
+            if (!sawData) {
+              failEarly(`yt-dlp failed before audio output (code ${code})${ytdlpTail ? `: ${ytdlpTail}` : ''}`);
+            }
+          }
         });
 
-        ffmpegProc.on('close', () => {
-          try {
-            if (!proc.killed) proc.kill('SIGKILL');
-          } catch (e) {}
+        ffmpegProc.on('close', (code) => {
+          if (!sawData) {
+            const ffmpegTail = tailProcessError(ffmpegStderrChunks);
+            failEarly(`ffmpeg finished before audio output (code ${code})${ffmpegTail ? `: ${ffmpegTail}` : ''}`);
+            return;
+          }
+
+          if (code !== 0 && code !== null) {
+            const ffmpegTail = tailProcessError(ffmpegStderrChunks);
+            console.log(`[playdl-shim] ffmpeg exited with code ${code}${ffmpegTail ? ` | ${ffmpegTail}` : ''}`);
+          }
+
+          try { if (!proc.killed) proc.kill('SIGKILL'); } catch (e) {}
         });
 
         const originalKill = ffmpegProc.kill.bind(ffmpegProc);
@@ -310,7 +419,7 @@ module.exports = {
           return originalKill(signal);
         };
 
-        return resolve({ stream: ffmpegProc.stdout, type: 'raw_pcm', process: ffmpegProc });
+        return;
 
       } catch (err) {
         console.error('[playdl-shim] spawn failed:', err && err.message ? err.message : err);
