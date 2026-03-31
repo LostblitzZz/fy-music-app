@@ -53,10 +53,10 @@ function Normalize-PathText {
     }
 
     try {
-        return [System.IO.Path]::GetFullPath($PathText).TrimEnd('\\', '/')
+        return [System.IO.Path]::GetFullPath($PathText).TrimEnd([char[]]@('\', '/'))
     }
     catch {
-        return $PathText.TrimEnd('\\', '/')
+        return $PathText.TrimEnd([char[]]@('\', '/'))
     }
 }
 
