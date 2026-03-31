@@ -400,13 +400,19 @@ class MusicPlayer extends EventEmitter {
         const playbackMs = Number(s && s.resource && s.resource.playbackDuration) || 0;
         const hasActiveProcess = !!(s && s.currentProcess && !s.currentProcess.killed);
         const stallRetryCount = Number(s && s.playing && s.playing._stallRetryCount) || 0;
+        const durationSec = Number(s && s.playing && s.playing.duration) || 0;
+        const durationMs = durationSec > 0 ? durationSec * 1000 : 0;
+        const veryShortKnownTrack = durationSec > 0 && durationSec <= 30;
+        const nearNaturalEnd = durationMs > 0 && playbackMs >= Math.max(9000, Math.floor(durationMs * 0.7));
 
         if (
           s &&
           s.playing &&
           hasActiveProcess &&
           playbackMs >= 1500 &&
-          playbackMs <= 18000 &&
+          playbackMs <= 12000 &&
+          !veryShortKnownTrack &&
+          !nearNaturalEnd &&
           stallRetryCount < 1
         ) {
           const retryTrack = { ...s.playing, _stallRetryCount: stallRetryCount + 1 };
