@@ -40,7 +40,6 @@ const {
 
 const MusicPlayer = require('./player');
 const playShim    = require('./playdl-shim');
-const yts         = require('yt-search');
 const lyricsFinder = require('lyrics-finder');
 
 let geniusClient = null;
@@ -1738,14 +1737,13 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.respond([{ name: 'Ketik minimal 2 huruf...', value: 'none' }]).catch(() => {});
       }
       try {
-        const res = await Promise.race([
-          yts(String(query)),
+        const tracks = await Promise.race([
+          playShim.search(String(query), { limit: 8 }),
           new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
         ]);
-        const videos  = res && res.videos ? res.videos.slice(0, 5) : [];
-        const choices = videos.map(v => ({
-          name:  (v && v.title ? v.title : 'Unknown').substring(0, 100),
-          value: v.url || 'none',
+        const choices = (Array.isArray(tracks) ? tracks : []).slice(0, 5).map((item) => ({
+          name: `${item && item.title ? item.title : 'Unknown'}${item && item.author ? ` — ${item.author}` : ''}`.substring(0, 100),
+          value: String((item && (item.url || item.title)) || 'none').substring(0, 100),
         }));
         await interaction.respond(choices.length ? choices : [{ name: 'Tidak ditemukan', value: 'none' }]).catch(() => {});
       } catch (err) {

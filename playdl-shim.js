@@ -159,6 +159,95 @@ function isLikelyMusicEntry(entry) {
   return false;
 }
 
+const NON_MUSIC_PATTERN = /\b(recipe|resep|masak|cooking|tutorial|review|reaction|prank|challenge|podcast|interview|news|berita|vlog|gaming|gameplay|minecraft|roblox|fortnite|trailer|episode|film|movie|mr\.?\s*beast|shorts?)\b/i;
+const MUSIC_HINT_PATTERN = /\b(song|music|audio|lyrics?|lagu|musik|ost|topic|vevo)\b/i;
+
+function normalizeText(input) {
+  return String(input || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeText(input) {
+  return normalizeText(input)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+}
+
+function scoreMusicEntry(entry, query) {
+  const title = String(entry && entry.title || '');
+  const channel = String(entry && (entry.channel || entry.uploader) || '');
+  const fullText = `${title} ${channel}`;
+  const lowerText = fullText.toLowerCase();
+  const queryTokens = tokenizeText(query);
+  const musicHinted = isLikelyMusicEntry(entry) || MUSIC_HINT_PATTERN.test(lowerText);
+
+  let score = 0;
+
+  if (isLikelyMusicEntry(entry)) score += 8;
+  if (MUSIC_HINT_PATTERN.test(lowerText)) score += 2;
+  if (!musicHinted) score -= 4;
+  if (/(?:\s-\s*topic\b)|\bvevo\b/i.test(channel)) score += 4;
+
+  const duration = Number(entry && entry.duration) || 0;
+  if (duration > 0 && duration < 45) score -= 5;
+  else if (duration >= 45 && duration <= 900) score += 2;
+  else if (duration > 1800) score -= 3;
+
+  if (NON_MUSIC_PATTERN.test(lowerText)) score -= 8;
+
+  for (const token of queryTokens) {
+    if (token.length < 3) continue;
+    if (normalizeText(title).includes(token)) score += 1.8;
+    else if (normalizeText(channel).includes(token)) score += 0.6;
+  }
+
+  return {
+    score,
+    musicHinted,
+  };
+}
+
+function filterAndRankMusicEntries(entries, query, limit) {
+  const scored = (entries || [])
+    .map((entry) => {
+      const scoredEntry = scoreMusicEntry(entry, query);
+      return {
+        entry,
+        score: scoredEntry.score,
+        musicHinted: scoredEntry.musicHinted,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  if (scored.length === 0) return [];
+
+  const hintedPool = scored.filter((item) => item.musicHinted);
+  const pool = hintedPool.length > 0 ? hintedPool : scored;
+  const strong = pool.filter((item) => item.score >= 2).map((item) => item.entry);
+  const fallback = pool.map((item) => item.entry);
+  const picked = strong.length > 0 ? strong : fallback;
+
+  return picked.slice(0, Math.max(1, limit));
+}
+
+function makeEntryKey(entry) {
+  if (!entry) return null;
+  const id = String(entry.id || '').trim();
+  if (id) return `id:${id}`;
+  const url = String(entry.webpage_url || entry.url || '').trim();
+  if (url) return `url:${url}`;
+  const title = String(entry.title || '').trim();
+  const channel = String(entry.channel || entry.uploader || '').trim();
+  if (!title && !channel) return null;
+  return `meta:${title}|${channel}`.toLowerCase();
+}
+
 // Keep music-like items first but never hide other potentially valid results.
 function prioritizeLikelyMusicEntries(entries) {
   if (!Array.isArray(entries) || entries.length === 0) return [];
@@ -187,11 +276,41 @@ module.exports = {
   search: async (query, { limit = 5 } = {}) => {
     try {
       if (!query) return [];
-      const target = `ytsearch${limit}:${query}`;
-      const info   = await runYtdlpJson(target, { noPlaylist: true });
-      if (!info) return [];
-      const entries = info.entries || (info.id ? [info] : []);
-      const sourceEntries = prioritizeLikelyMusicEntries(entries);
+      const normalizedQuery = String(query).trim();
+      const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
+      const fetchLimit = Math.max(12, safeLimit * 4);
+
+      const searchQueries = [normalizedQuery];
+      if (!MUSIC_HINT_PATTERN.test(normalizedQuery)) {
+        searchQueries.push(`${normalizedQuery} official audio`);
+      }
+
+      const mergedEntries = [];
+      const seen = new Set();
+
+      for (const q of searchQueries) {
+        try {
+          const target = `ytsearch${fetchLimit}:${q}`;
+          const info = await runYtdlpJson(target, { noPlaylist: true });
+          if (!info) continue;
+
+          const entries = info.entries || (info.id ? [info] : []);
+          for (const entry of entries) {
+            const key = makeEntryKey(entry);
+            if (key && seen.has(key)) continue;
+            if (key) seen.add(key);
+            mergedEntries.push(entry);
+          }
+        } catch (e) {
+          // Continue with other fallback queries.
+        }
+      }
+
+      const sourceEntries = filterAndRankMusicEntries(
+        prioritizeLikelyMusicEntries(mergedEntries),
+        normalizedQuery,
+        safeLimit
+      );
 
       return sourceEntries.map(e => ({
         title:    (e && e.title) ? e.title : 'Unknown Title',
