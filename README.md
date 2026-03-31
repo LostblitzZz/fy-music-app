@@ -49,7 +49,7 @@ Designed & Developed with ❤️ by **Raitzu**.
 If this bot is running 24/7 on another Windows laptop using PM2, you can update it from terminal with one command:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AutoStash
+powershell -ExecutionPolicy Bypass -File .\update-now.ps1
 ```
 
 What this script does:
@@ -58,15 +58,27 @@ What this script does:
 - Auto-detects the PM2 app from the current project folder.
 - Restarts PM2 app and saves PM2 state.
 
+Shortcut note:
+- `update-now.ps1` is a wrapper that calls `update-bot.ps1` with practical defaults.
+- AutoStash is enabled by default in wrapper mode.
+
 Optional parameters:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
+powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -ShowLogs
+powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app -ShowLogs
 ```
 
 - `-AppName` to force a specific PM2 app name.
 - `-ShowLogs` to show latest PM2 logs after restart.
 - `-SkipNpm` to skip dependency installation.
+- `-NoAutoStash` to disable auto stash.
+
+Advanced mode (full control):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
+```
 
 ## 📜 Available Commands
 
@@ -129,7 +141,7 @@ Dibuat dengan sepenuh hati oleh **Raitzu**.
 Kalau bot ini jalan 24/7 di laptop Windows lain pakai PM2, update cukup lewat terminal dengan satu perintah:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AutoStash
+powershell -ExecutionPolicy Bypass -File .\update-now.ps1
 ```
 
 Yang dilakukan skrip:
@@ -138,15 +150,27 @@ Yang dilakukan skrip:
 - Auto-detect nama app PM2 dari folder project saat ini.
 - Restart app PM2 lalu simpan state PM2.
 
+Catatan shortcut:
+- `update-now.ps1` adalah wrapper yang memanggil `update-bot.ps1` dengan default yang praktis.
+- AutoStash otomatis aktif saat pakai wrapper ini.
+
 Parameter opsional:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
+powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -ShowLogs
+powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app -ShowLogs
 ```
 
 - `-AppName` untuk paksa nama app PM2 tertentu.
 - `-ShowLogs` untuk menampilkan log PM2 setelah restart.
 - `-SkipNpm` untuk lewati instal dependency.
+- `-NoAutoStash` untuk menonaktifkan auto stash.
+
+Mode lanjutan (kontrol penuh):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\update-bot.ps1 -AppName fy-music-app -AutoStash -ShowLogs
+```
 
 ## 📜 Perintah Tersedia
 
