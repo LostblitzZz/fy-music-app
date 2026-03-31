@@ -227,6 +227,29 @@ function Ensure-YtdlpBinary {
     return $binaryPath
 }
 
+function Test-RequiredDependenciesInstalled {
+    param(
+        [string]$ProjectDir
+    )
+
+    $requiredModules = @(
+        "dotenv",
+        "discord.js",
+        "@discordjs/voice",
+        "yt-dlp-exec"
+    )
+
+    foreach ($moduleName in $requiredModules) {
+        $moduleRelativePath = "node_modules\\" + ($moduleName -replace "/", "\\")
+        $modulePath = Join-Path $ProjectDir $moduleRelativePath
+        if (-not (Test-Path $modulePath)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "Git tidak ditemukan. Install Git terlebih dahulu."
 }
@@ -279,16 +302,24 @@ if ($beforePullHead -and $afterPullHead -and $beforePullHead -ne $afterPullHead)
 }
 
 $nodeModulesExists = Test-Path ".\\node_modules"
+$requiredDepsInstalled = $nodeModulesExists -and (Test-RequiredDependenciesInstalled -ProjectDir $scriptDir)
 $shouldRunNpm = $false
 $npmDecisionReason = ""
 
-if ($SkipNpm) {
-    $shouldRunNpm = $false
-    $npmDecisionReason = "SkipNpm aktif"
-}
-elseif ($ForceNpm) {
+if ($ForceNpm) {
     $shouldRunNpm = $true
     $npmDecisionReason = "ForceNpm aktif"
+}
+elseif ($SkipNpm) {
+    if (-not $requiredDepsInstalled) {
+        $shouldRunNpm = $true
+        $npmDecisionReason = "SkipNpm diabaikan karena dependency inti belum lengkap"
+        Write-Host "Peringatan: dependency inti belum lengkap, jadi SkipNpm otomatis diabaikan." -ForegroundColor Yellow
+    }
+    else {
+        $shouldRunNpm = $false
+        $npmDecisionReason = "SkipNpm aktif"
+    }
 }
 elseif (-not $nodeModulesExists) {
     $shouldRunNpm = $true

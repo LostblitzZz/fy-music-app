@@ -73,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app 
 
 - `-AppName` to force a specific PM2 app name.
 - `-ShowLogs` to show latest PM2 logs after restart.
-- `-SkipNpm` to skip dependency installation.
+- `-SkipNpm` to skip dependency installation (only when dependencies are already installed).
 - `-ForceNpm` to force dependency installation.
 - `-NoAutoStash` to disable auto stash.
 
@@ -168,7 +168,7 @@ powershell -ExecutionPolicy Bypass -File .\update-now.ps1 -AppName fy-music-app 
 
 - `-AppName` untuk paksa nama app PM2 tertentu.
 - `-ShowLogs` untuk menampilkan log PM2 setelah restart.
-- `-SkipNpm` untuk lewati instal dependency.
+- `-SkipNpm` untuk lewati instal dependency (hanya jika dependency sudah terpasang).
 - `-ForceNpm` untuk paksa instal dependency.
 - `-NoAutoStash` untuk menonaktifkan auto stash.
 
