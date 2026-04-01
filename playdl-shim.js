@@ -9,6 +9,7 @@ const fs   = require('fs');
 const path = require('path');
 
 let ffmpegPath = process.env.FFMPEG_PATH || null;
+const ENABLE_STREAM_SEEK = /^(1|true|yes)$/i.test(String(process.env.ENABLE_STREAM_SEEK || ''));
 if (!ffmpegPath) {
   try {
     ffmpegPath = require('ffmpeg-static');
@@ -221,7 +222,7 @@ function prioritizeLikelyMusicEntries(entries) {
     .sort((a, b) => Number(isLikelyMusicEntry(b)) - Number(isLikelyMusicEntry(a)));
 }
 
-const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || 'youtube:player_client=web,web_safari,mweb';
+const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || 'youtube:player_client=web,web_safari';
 const YTDLP_JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES || 'node';
 const YTDLP_SEARCH_EXTRACTOR_ARGS = process.env.YTDLP_SEARCH_EXTRACTOR_ARGS || 'youtube:player_client=web_music';
 
@@ -292,7 +293,9 @@ module.exports = {
     if (!normalizedQuery) return [];
 
     const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
-    const safeTimeoutMs = Math.max(900, Number(timeoutMs) || 2800);
+    const requestedTimeout = Number(timeoutMs) || 0;
+    const defaultTimeout = safeLimit <= 2 ? 1800 : 2500;
+    const safeTimeoutMs = Math.max(700, requestedTimeout || defaultTimeout);
     const cacheKey = `${normalizedQuery.toLowerCase()}::${safeLimit}`;
 
     try {
@@ -308,7 +311,9 @@ module.exports = {
       }
 
       const loader = (async () => {
-        const fetchLimit = Math.max(8, Math.min(25, safeLimit * 2));
+        const fetchLimit = safeLimit <= 2
+          ? 3
+          : Math.max(5, Math.min(14, safeLimit + 3));
         const target = `ytsearch${fetchLimit}:${normalizedQuery}`;
         const info = await runYtdlpJson(
           target,
@@ -372,12 +377,14 @@ module.exports = {
           : `ytsearch1:${String(target)}`;
         const selectedPreset = normalizeAudioPreset(opts && opts.audioPreset);
         const audioFilter = getFilterForAudioPreset(selectedPreset);
-        const startAtSeconds = Math.max(0, Number(opts && opts.startAtSeconds) || 0);
-        const needsSeek = startAtSeconds > 0.5;
+        const requestedStartAtSeconds = Math.max(0, Number(opts && opts.startAtSeconds) || 0);
+        const startAtSeconds = ENABLE_STREAM_SEEK ? requestedStartAtSeconds : 0;
+        const needsSeek = ENABLE_STREAM_SEEK && startAtSeconds > 0.5;
 
-        // Prefer pure audio, then fall back to mp4/best if YouTube exposes limited formats.
+        // Stability-first format selection: progressive mp4 tends to be more reliable
+        // than segmented adaptive streams for long Discord playback sessions.
         const args = [
-          '-f', 'bestaudio[ext=m4a][protocol=https]/bestaudio[ext=webm][protocol=https]/bestaudio/best[ext=mp4]/best',
+          '-f', '18/22/best[ext=mp4][protocol=https]/best[protocol=https]/best',
           '-o', '-',
           '--no-playlist',
           '--no-part',

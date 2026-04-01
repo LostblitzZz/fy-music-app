@@ -22,6 +22,8 @@ bot.log
 
 # Runtime state
 data/player-state.json
+data/bot-instance.lock.json
+--Frag*
 
 # OS
 .DS_Store
@@ -32,3 +34,9 @@ Thumbs.db
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Local investigation artifacts
+.tmp/
+*.tgz
+vendor/yt-dlp-exec/node_modules/
+vendor/yt-dlp-exec/bin/

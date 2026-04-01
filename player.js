@@ -32,6 +32,8 @@ const fs = require('fs');
 const path = require('path');
 
 const PLAYER_STATE_FILE = path.join(process.cwd(), 'data', 'player-state.json');
+const RESTORE_QUEUE_ON_BOOT = false;
+const RESTORE_AUTOMATION_ON_BOOT = false;
 
 const AUDIO_PRESET_CONFIG = Object.freeze({
   flat: {
@@ -306,13 +308,15 @@ class MusicPlayer extends EventEmitter {
     try {
       const restoredQueue = [];
 
-      const restoredPlaying = sanitizeTrack(snapshot.playing);
-      if (restoredPlaying) restoredQueue.push(restoredPlaying);
+      if (RESTORE_QUEUE_ON_BOOT) {
+        const restoredPlaying = sanitizeTrack(snapshot.playing);
+        if (restoredPlaying) restoredQueue.push(restoredPlaying);
 
-      if (Array.isArray(snapshot.queue)) {
-        for (const track of snapshot.queue) {
-          const safe = sanitizeTrack(track);
-          if (safe) restoredQueue.push(safe);
+        if (Array.isArray(snapshot.queue)) {
+          for (const track of snapshot.queue) {
+            const safe = sanitizeTrack(track);
+            if (safe) restoredQueue.push(safe);
+          }
         }
       }
 
@@ -327,13 +331,15 @@ class MusicPlayer extends EventEmitter {
 
       state.loopMode = ['none', 'track', 'queue'].includes(snapshot.loopMode) ? snapshot.loopMode : 'none';
       state.shuffle = !!snapshot.shuffle;
-      state.autoplay = !!snapshot.autoplay;
+      state.autoplay = RESTORE_AUTOMATION_ON_BOOT ? !!snapshot.autoplay : false;
       state.audioPreset = normalizeAudioPresetName(snapshot.audioPreset);
       state.stay24h = !!snapshot.stay24h;
 
       state.radio = {
-        enabled: !!(snapshot.radio && snapshot.radio.enabled),
-        keyword: snapshot.radio && typeof snapshot.radio.keyword === 'string' ? snapshot.radio.keyword : null,
+        enabled: RESTORE_AUTOMATION_ON_BOOT ? !!(snapshot.radio && snapshot.radio.enabled) : false,
+        keyword: RESTORE_AUTOMATION_ON_BOOT && snapshot.radio && typeof snapshot.radio.keyword === 'string'
+          ? snapshot.radio.keyword
+          : null,
       };
 
       state.lastTextChannelId = snapshot.lastTextChannelId ? String(snapshot.lastTextChannelId) : null;
@@ -341,9 +347,6 @@ class MusicPlayer extends EventEmitter {
         ? snapshot.lastPlayed.filter((item) => typeof item === 'string').slice(-100)
         : [];
 
-      if (state.queue.length > 0) {
-        console.log(`[player] restored queue for guild ${guildId}: ${state.queue.length} track(s)`);
-      }
     } catch (err) {
       console.warn(`[player] failed to apply snapshot for guild ${guildId}:`, err && err.message ? err.message : err);
     } finally {
@@ -397,37 +400,6 @@ class MusicPlayer extends EventEmitter {
         newState.status === AudioPlayerStatus.Idle
       ) {
         const s = this.guilds.get(guildId);
-        const playbackMs = Number(s && s.resource && s.resource.playbackDuration) || 0;
-        const hasActiveProcess = !!(s && s.currentProcess && !s.currentProcess.killed);
-        const stallRetryCount = Number(s && s.playing && s.playing._stallRetryCount) || 0;
-        const durationSec = Number(s && s.playing && s.playing.duration) || 0;
-        const durationMs = durationSec > 0 ? durationSec * 1000 : 0;
-        const veryShortKnownTrack = durationSec > 0 && durationSec <= 30;
-        const nearNaturalEnd = durationMs > 0 && playbackMs >= Math.max(9000, Math.floor(durationMs * 0.7));
-
-        if (
-          s &&
-          s.playing &&
-          hasActiveProcess &&
-          playbackMs >= 1500 &&
-          playbackMs <= 12000 &&
-          !veryShortKnownTrack &&
-          !nearNaturalEnd &&
-          stallRetryCount < 1
-        ) {
-          const retryTrack = { ...s.playing, _stallRetryCount: stallRetryCount + 1 };
-          const resumeAt = Math.max(0, Math.floor(playbackMs / 1000) - 1);
-          if (resumeAt > 0) retryTrack.resumeAt = resumeAt;
-
-          console.warn(`[player] early idle detected (${playbackMs}ms) while stream is alive; retrying current track once`);
-
-          this._killProcess(guildId);
-          s.playing = null;
-          s.resource = null;
-          s.queue.unshift(retryTrack);
-          setImmediate(() => this._playNext(guildId));
-          return;
-        }
 
         // Track ended — record it to lastPlayed to avoid radio repeat
         try {
@@ -626,7 +598,7 @@ class MusicPlayer extends EventEmitter {
   async searchTrack(keyword, exclude = []) {
     try {
       if (!keyword) return null;
-      const results = await play.search(keyword, { limit: 10 });
+      const results = await play.search(keyword, { limit: 8, timeoutMs: 2200 });
       if (!results || results.length === 0) return null;
       const excludeSet = new Set(
         (exclude || [])
@@ -882,7 +854,7 @@ class MusicPlayer extends EventEmitter {
             // track title (fallback for non-YouTube sources or short links).
             if (!videoId && previousTrack.title) {
               try {
-                const searchResults = await play.search(previousTrack.title, { limit: 5 });
+                const searchResults = await play.search(previousTrack.title, { limit: 4, timeoutMs: 1800 });
                 const ytCandidate = (searchResults || []).find(r => !!this._extractVideoId(r.url));
                 if (ytCandidate && ytCandidate.url) videoId = this._extractVideoId(ytCandidate.url);
               } catch (e) {
@@ -898,7 +870,7 @@ class MusicPlayer extends EventEmitter {
               if (!pick) {
                 const fallbackQueries = this._buildAutoplayFallbackQueries(previousTrack);
                 for (const query of fallbackQueries) {
-                  const fallbackResults = await play.search(query, { limit: 12 });
+                  const fallbackResults = await play.search(query, { limit: 8, timeoutMs: 2200 });
                   pick = this._pickAutoplayCandidate(fallbackResults, avoidSets, previousTrack);
                   if (pick) {
                     console.log(`[player] Autoplay fallback from search: ${query}`);
@@ -927,7 +899,7 @@ class MusicPlayer extends EventEmitter {
             if (!videoId) {
               const fallbackQueries = this._buildAutoplayFallbackQueries(previousTrack);
               for (const query of fallbackQueries) {
-                const fallbackResults = await play.search(query, { limit: 12 });
+                const fallbackResults = await play.search(query, { limit: 8, timeoutMs: 2200 });
                 const pick = this._pickAutoplayCandidate(fallbackResults, avoidSets, previousTrack);
                 if (!pick) continue;
 
@@ -1028,6 +1000,20 @@ class MusicPlayer extends EventEmitter {
         let streamInfo;
         const validate = play.yt_validate && play.yt_validate(source);
 
+        // Ensure duration/title metadata exists for URL tracks so autoplay can
+        // decide natural-end vs premature-end using actual track length.
+        if (next && next.url && (!next.duration || !next.title || !next.author)) {
+          try {
+            const info = await play.getInfo(next.url);
+            if (info) {
+              if (!next.duration && info.duration) next.duration = info.duration;
+              if ((!next.title || next.title === next.url) && info.title) next.title = info.title;
+              if (!next.author && info.author) next.author = info.author;
+              if (!next.thumbnail && info.thumbnail) next.thumbnail = info.thumbnail;
+            }
+          } catch (e) {}
+        }
+
         if (validate === 'video') {
           // Direct YouTube URL
           streamInfo = await play.stream(source, { audioPreset: activePreset, startAtSeconds: resumeAt });
@@ -1040,7 +1026,7 @@ class MusicPlayer extends EventEmitter {
           const expectedTitle = (next && (next.spotifyTitle || next.title || source)) || source;
           const expectedArtist = (next && next.spotifyArtist) || '';
 
-          const results = await play.search(source, { limit: strictSpotify ? 8 : 1 });
+          const results = await play.search(source, { limit: strictSpotify ? 8 : 1, timeoutMs: strictSpotify ? 2800 : 1700 });
           if (!results || results.length === 0) throw new Error(`No results found for: "${source}"`);
 
           let picked = results[0];
@@ -1050,7 +1036,7 @@ class MusicPlayer extends EventEmitter {
             // Second pass: query with "topic" hint to bias official artist uploads.
             if (!best && expectedTitle && expectedArtist) {
               const fallbackQuery = `${expectedTitle} ${expectedArtist} topic`;
-              const fallback = await play.search(fallbackQuery, { limit: 8 });
+              const fallback = await play.search(fallbackQuery, { limit: 8, timeoutMs: 2800 });
               best = this._pickBestSearchResult(fallback, expectedTitle, expectedArtist);
             }
 
@@ -1125,8 +1111,8 @@ class MusicPlayer extends EventEmitter {
 
   skip(guildId) {
     console.log('[player] Skip requested for guild', guildId);
-    this._killProcess(guildId);
     const state = this._ensureGuild(guildId);
+    this._killProcess(guildId);
     if (state.player) state.player.stop(true);
     // Immediately attempt to play next (helps autoplay trigger on manual skip)
     try { setImmediate(() => this._playNext(guildId)); } catch (e) {}

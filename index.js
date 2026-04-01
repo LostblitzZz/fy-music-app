@@ -2,7 +2,85 @@
 'use strict';
 
 require('dotenv').config();
+const fs = require('fs');
 const path = require('path');
+
+const INSTANCE_LOCK_FILE = path.join(process.cwd(), 'data', 'bot-instance.lock.json');
+let instanceLockHeld = false;
+
+function isProcessAlive(pid) {
+  const id = Number(pid);
+  if (!Number.isInteger(id) || id <= 0) return false;
+
+  try {
+    process.kill(id, 0);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function acquireInstanceLock() {
+  try {
+    fs.mkdirSync(path.dirname(INSTANCE_LOCK_FILE), { recursive: true });
+
+    if (fs.existsSync(INSTANCE_LOCK_FILE)) {
+      try {
+        const raw = fs.readFileSync(INSTANCE_LOCK_FILE, 'utf8');
+        const existing = raw ? JSON.parse(raw) : null;
+        const runningPid = existing && Number(existing.pid);
+
+        if (
+          Number.isInteger(runningPid) &&
+          runningPid > 0 &&
+          runningPid !== process.pid &&
+          isProcessAlive(runningPid)
+        ) {
+          console.error(`[bot] Another Fy Music instance is already running (PID ${runningPid}). Stop it before starting a new one.`);
+          process.exit(1);
+        }
+      } catch (e) {
+        // Corrupted/stale lock is safe to replace.
+      }
+    }
+
+    const payload = {
+      pid: process.pid,
+      startedAt: Date.now(),
+      cwd: process.cwd(),
+    };
+    fs.writeFileSync(INSTANCE_LOCK_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    instanceLockHeld = true;
+  } catch (err) {
+    console.warn('[bot] Failed to create instance lock:', err && err.message ? err.message : err);
+  }
+}
+
+function releaseInstanceLock() {
+  if (!instanceLockHeld) return;
+
+  try {
+    if (fs.existsSync(INSTANCE_LOCK_FILE)) {
+      try {
+        const raw = fs.readFileSync(INSTANCE_LOCK_FILE, 'utf8');
+        const data = raw ? JSON.parse(raw) : null;
+        const lockPid = data && Number(data.pid);
+
+        if (!Number.isInteger(lockPid) || lockPid === process.pid) {
+          fs.unlinkSync(INSTANCE_LOCK_FILE);
+        }
+      } catch (e) {
+        try { fs.unlinkSync(INSTANCE_LOCK_FILE); } catch (e2) {}
+      }
+    }
+  } catch (err) {
+    console.warn('[bot] Failed to release instance lock:', err && err.message ? err.message : err);
+  } finally {
+    instanceLockHeld = false;
+  }
+}
+
+acquireInstanceLock();
 
 process.on('unhandledRejection', (reason) => {
   console.error('[bot] Unhandled Rejection:', reason);
@@ -2329,16 +2407,23 @@ function flushPlayerState(reason) {
 
 process.on('SIGINT', () => {
   flushPlayerState('SIGINT');
+  releaseInstanceLock();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   flushPlayerState('SIGTERM');
+  releaseInstanceLock();
   process.exit(0);
 });
 
 process.on('beforeExit', () => {
   flushPlayerState('beforeExit');
+  releaseInstanceLock();
+});
+
+process.on('exit', () => {
+  releaseInstanceLock();
 });
 
 // ── Login ─────────────────────────────────────────────────────────────────────
@@ -2346,10 +2431,12 @@ process.on('beforeExit', () => {
 const token = process.env.DISCORD_TOKEN;
 if (!token || token === 'YOUR_BOT_TOKEN_HERE') {
   console.error('[bot] DISCORD_TOKEN is not set in .env — please fill in your token.');
+  releaseInstanceLock();
   process.exit(1);
 }
 
 client.login(token).catch(err => {
   console.error('[bot] Failed to login:', err && err.message ? err.message : err);
+  releaseInstanceLock();
   process.exit(1);
 });
