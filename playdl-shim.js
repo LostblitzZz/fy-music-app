@@ -3,7 +3,7 @@
 'use strict';
 
 const ytdlp = require('yt-dlp-exec');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { PassThrough } = require('stream');
 const fs   = require('fs');
 const path = require('path');
@@ -20,35 +20,75 @@ if (!ffmpegPath) {
 
 // Resolve yt-dlp executable path robustly to avoid ENOENT on Windows
 function resolveYtdlpExecutable() {
-  try {
-    // 1. If ytdlp.path is a real absolute path that exists, use it directly
-    if (ytdlp && ytdlp.path && typeof ytdlp.path === 'string' && ytdlp.path !== 'yt-dlp') {
-      try { if (fs.existsSync(ytdlp.path)) return ytdlp.path; } catch (e) {}
+  const fileExists = (p) => {
+    if (!p || typeof p !== 'string') return false;
+    try { return fs.existsSync(p); } catch (e) { return false; }
+  };
+
+  const collectCandidates = () => {
+    const candidates = [];
+
+    // 1. Path exposed by the wrapper package
+    if (ytdlp && typeof ytdlp.path === 'string' && ytdlp.path && ytdlp.path !== 'yt-dlp') {
+      candidates.push(ytdlp.path);
     }
 
-    // 2. Locate the binary inside the yt-dlp-exec package's bin/ directory
+    // 2. Binary locations relative to package root
     try {
-      const resolved  = require.resolve('yt-dlp-exec');
-      const base      = path.dirname(resolved);
-      const binName   = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-      const candidates = [
-        path.join(base, '..', 'bin', binName),
-        path.join(base, 'bin', binName),
-        path.join(base, '..', binName),
-      ];
-      for (const c of candidates) {
-        try { if (fs.existsSync(c)) return c; } catch (e) {}
+      const resolved = require.resolve('yt-dlp-exec');
+      const base = path.dirname(resolved);
+      const binName = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+      candidates.push(path.join(base, '..', 'bin', binName));
+      candidates.push(path.join(base, 'bin', binName));
+      candidates.push(path.join(base, '..', binName));
+
+      // Keep package root handy for optional bootstrap step.
+      candidates.packageBase = base;
+    } catch (e) {}
+
+    return candidates;
+  };
+
+  const tryResolveFromCandidates = (candidates) => {
+    for (const c of candidates) {
+      if (fileExists(c)) return c;
+    }
+    return null;
+  };
+
+  try {
+    const candidates = collectCandidates();
+    let resolvedPath = tryResolveFromCandidates(candidates);
+    if (resolvedPath) return resolvedPath;
+
+    // 3. If missing, run package postinstall once to bootstrap bin/yt-dlp
+    try {
+      const base = candidates.packageBase;
+      const installScript = base ? path.join(base, '..', 'scripts', 'postinstall.js') : null;
+      if (fileExists(installScript)) {
+        spawnSync(process.execPath, [installScript], {
+          cwd: path.join(base, '..'),
+          windowsHide: true,
+          stdio: 'ignore',
+          timeout: 180000,
+        });
       }
     } catch (e) {}
 
-    // 3. Fallback: rely on PATH
-    return (ytdlp && ytdlp.path) ? ytdlp.path : 'yt-dlp';
+    resolvedPath = tryResolveFromCandidates(candidates);
+    if (resolvedPath) return resolvedPath;
+
+    // 4. Last fallback: rely on PATH
+    return 'yt-dlp';
   } catch (e) {
-    return (ytdlp && ytdlp.path) ? ytdlp.path : 'yt-dlp';
+    return 'yt-dlp';
   }
 }
 
 const ytdlpPath = resolveYtdlpExecutable();
+const ytdlpRunner = (ytdlp && typeof ytdlp.create === 'function')
+  ? ytdlp.create(ytdlpPath)
+  : ytdlp;
 console.log('[playdl-shim] using yt-dlp path:', ytdlpPath);
 if (ffmpegPath) {
   console.log('[playdl-shim] using ffmpeg path:', ffmpegPath);
@@ -107,7 +147,7 @@ async function runYtdlpJson(target, extra = {}, runtime = {}) {
   }
 
   try {
-    const out = await ytdlp.exec(target, opts, execOpts);
+    const out = await ytdlpRunner.exec(target, opts, execOpts);
     const stdout = out && out.stdout ? out.stdout : '';
     if (!stdout) return null;
     if (typeof stdout === 'string') return JSON.parse(stdout);
