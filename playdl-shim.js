@@ -3,6 +3,7 @@
 'use strict';
 
 const ytdlp = require('yt-dlp-exec');
+const ytSearch = require('yt-search');
 const { spawn, spawnSync } = require('child_process');
 const { PassThrough } = require('stream');
 const fs   = require('fs');
@@ -266,8 +267,8 @@ const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || 'youtube:player
 const YTDLP_JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES || 'node';
 const YTDLP_SEARCH_EXTRACTOR_ARGS = process.env.YTDLP_SEARCH_EXTRACTOR_ARGS || 'youtube:player_client=web_music';
 
-const SEARCH_CACHE_TTL_MS = Math.max(3000, Number(process.env.SEARCH_CACHE_TTL_MS) || 12000);
-const SEARCH_CACHE_MAX_SIZE = Math.max(25, Number(process.env.SEARCH_CACHE_MAX_SIZE) || 150);
+const SEARCH_CACHE_TTL_MS = Math.max(3000, Number(process.env.SEARCH_CACHE_TTL_MS) || 60000);
+const SEARCH_CACHE_MAX_SIZE = Math.max(25, Number(process.env.SEARCH_CACHE_MAX_SIZE) || 300);
 const searchCache = new Map();
 const searchInFlight = new Map();
 
@@ -351,32 +352,49 @@ module.exports = {
       }
 
       const loader = (async () => {
-        const fetchLimit = safeLimit <= 2
-          ? 3
-          : Math.max(5, Math.min(14, safeLimit + 3));
-        const target = `ytsearch${fetchLimit}:${normalizedQuery}`;
-        const info = await runYtdlpJson(
-          target,
-          {
-            noPlaylist: true,
-            flatPlaylist: true,
-            extractorArgs: YTDLP_SEARCH_EXTRACTOR_ARGS,
-          },
-          { timeoutMs: safeTimeoutMs }
-        );
-
-        if (!info) return [];
-
-        const entries = dedupeEntries(info.entries || (info.id ? [info] : []))
-          .slice(0, safeLimit);
-
-        return entries.map((e) => ({
-          title: (e && e.title) ? e.title : 'Unknown Title',
-          url: (e && (e.webpage_url || e.url)) ? toMusicYouTubeUrl(e.webpage_url || e.url) : '',
-          duration: (e && e.duration) ? parseInt(e.duration, 10) : 0,
-          thumbnail: (e && e.thumbnail) ? e.thumbnail : (e && e.thumbnails && e.thumbnails[0] ? e.thumbnails[0].url : ''),
-          author: (e && (e.uploader || e.channel)) ? (e.uploader || e.channel) : 'Unknown Artist',
+        const mapVideos = (videos) => videos.slice(0, safeLimit).map((v) => ({
+          title: v.title || 'Unknown Title',
+          url: v.url || '',
+          duration: v.duration && v.duration.seconds ? v.duration.seconds : 0,
+          thumbnail: v.thumbnail || v.image || '',
+          author: (v.author && v.author.name) ? v.author.name : 'Unknown Artist',
         }));
+
+        // Attempt 1: yt-search with timeout
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const searchPromise = ytSearch(normalizedQuery);
+            let timer;
+            const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('yt-search timeout')), safeTimeoutMs); });
+            const results = await Promise.race([searchPromise, timeout]).finally(() => clearTimeout(timer));
+            if (results && results.videos && results.videos.length > 0) return mapVideos(results.videos);
+          } catch (err) {
+            console.warn(`[playdl-shim] yt-search attempt ${attempt + 1} failed:`, err && err.message ? err.message : err);
+          }
+        }
+
+        // Fallback: yt-dlp ytsearch
+        try {
+          console.log('[playdl-shim] falling back to yt-dlp ytsearch for:', normalizedQuery);
+          const info = await runYtdlpJson(`ytsearch${safeLimit}:${normalizedQuery}`, {
+            flatPlaylist: true,
+            noPlaylist: false,
+          }, { timeoutMs: 8000 });
+          const entries = info && Array.isArray(info.entries) ? info.entries : (info && info.title ? [info] : []);
+          if (entries.length > 0) {
+            return entries.slice(0, safeLimit).map((e) => ({
+              title: e.title || 'Unknown Title',
+              url: e.webpage_url || e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : ''),
+              duration: e.duration ? parseInt(e.duration) : 0,
+              thumbnail: e.thumbnail || '',
+              author: e.uploader || e.channel || 'Unknown Artist',
+            }));
+          }
+        } catch (err) {
+          console.warn('[playdl-shim] yt-dlp ytsearch fallback failed:', err && err.message ? err.message : err);
+        }
+
+        return [];
       })();
 
       searchInFlight.set(cacheKey, loader);
@@ -408,13 +426,17 @@ module.exports = {
    * @returns {Promise<{stream: import('stream').Readable, type: string, process: import('child_process').ChildProcess}>}
    */
   stream: (target, opts = {}) => {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       try {
         if (!target) return reject(new Error('No target provided to stream()'));
 
-        const spawnTarget = isUrl(target)
-          ? normalizePlayableTarget(target)
-          : `ytsearch1:${String(target)}`;
+        let spawnTarget;
+        if (isUrl(target)) {
+          spawnTarget = normalizePlayableTarget(target);
+        } else {
+          // Let yt-dlp handle search natively — avoids redundant yt-search call
+          spawnTarget = `ytsearch1:${String(target)}`;
+        }
         const selectedPreset = normalizeAudioPreset(opts && opts.audioPreset);
         const audioFilter = getFilterForAudioPreset(selectedPreset);
         const requestedStartAtSeconds = Math.max(0, Number(opts && opts.startAtSeconds) || 0);
@@ -424,7 +446,7 @@ module.exports = {
         // Stability-first format selection: progressive mp4 tends to be more reliable
         // than segmented adaptive streams for long Discord playback sessions.
         const args = [
-          '-f', '18/22/best[ext=mp4][protocol=https]/best[protocol=https]/best',
+          '-f', 'ba[ext=m4a]/ba/ba*[ext=m4a]/18/22/best[ext=mp4][protocol=https]/best',
           '-o', '-',
           '--no-playlist',
           '--no-part',

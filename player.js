@@ -34,6 +34,7 @@ const path = require('path');
 const PLAYER_STATE_FILE = path.join(process.cwd(), 'data', 'player-state.json');
 const RESTORE_QUEUE_ON_BOOT = false;
 const RESTORE_AUTOMATION_ON_BOOT = false;
+const METADATA_LOOKUP_TIMEOUT_MS = Math.max(800, Number(process.env.METADATA_LOOKUP_TIMEOUT_MS) || 2500);
 
 const AUDIO_PRESET_CONFIG = Object.freeze({
   flat: {
@@ -531,18 +532,8 @@ class MusicPlayer extends EventEmitter {
       if (!it) continue;
       if (it.textChannelId) state.lastTextChannelId = it.textChannelId;
       if (state.queue.length >= state.maxQueue) break;
-      
-      // If it's a URL and missing metadata, fetch it
-      if (it.url && (!it.duration || !it.thumbnail)) {
-        const info = await play.getInfo(it.url).catch(() => null);
-        if (info) {
-          it.title = info.title || it.title;
-          it.duration = info.duration || 0;
-          it.thumbnail = info.thumbnail || '';
-          it.author = info.author || 'Unknown Artist';
-        }
-      }
-      
+      // Metadata (duration/thumbnail) will be resolved lazily in _playNext()
+      // to avoid blocking enqueue with slow yt-dlp getInfo calls.
       state.queue.push(it);
     }
 
@@ -822,6 +813,38 @@ class MusicPlayer extends EventEmitter {
     return best.candidate;
   }
 
+  _resolveTrackMetadataInBackground(track) {
+    if (!track || !track.url) return;
+    if (track._metadataResolving || track._metadataResolved) return;
+
+    const needsMetadata = !track.duration && !track.author && (!track.title || track.title === track.url);
+    if (!needsMetadata) {
+      track._metadataResolved = true;
+      return;
+    }
+
+    track._metadataResolving = true;
+    const targetUrl = track.url;
+    const timeoutMs = METADATA_LOOKUP_TIMEOUT_MS;
+    const lookup = Promise.race([
+      play.getInfo(targetUrl).catch(() => null),
+      new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+    ]);
+
+    lookup
+      .then((info) => {
+        if (!info) return;
+        if (!track.duration && info.duration) track.duration = info.duration;
+        if ((!track.title || track.title === targetUrl) && info.title) track.title = info.title;
+        if (!track.author && info.author) track.author = info.author;
+        if (!track.thumbnail && info.thumbnail) track.thumbnail = info.thumbnail;
+      })
+      .finally(() => {
+        track._metadataResolving = false;
+        track._metadataResolved = true;
+      });
+  }
+
   // ─── Playback core ───────────────────────────────────────────────────────────
 
   /** @private */
@@ -1000,20 +1023,6 @@ class MusicPlayer extends EventEmitter {
         let streamInfo;
         const validate = play.yt_validate && play.yt_validate(source);
 
-        // Ensure duration/title metadata exists for URL tracks so autoplay can
-        // decide natural-end vs premature-end using actual track length.
-        if (next && next.url && (!next.duration || !next.title || !next.author)) {
-          try {
-            const info = await play.getInfo(next.url);
-            if (info) {
-              if (!next.duration && info.duration) next.duration = info.duration;
-              if ((!next.title || next.title === next.url) && info.title) next.title = info.title;
-              if (!next.author && info.author) next.author = info.author;
-              if (!next.thumbnail && info.thumbnail) next.thumbnail = info.thumbnail;
-            }
-          } catch (e) {}
-        }
-
         if (validate === 'video') {
           // Direct YouTube URL
           streamInfo = await play.stream(source, { audioPreset: activePreset, startAtSeconds: resumeAt });
@@ -1026,7 +1035,7 @@ class MusicPlayer extends EventEmitter {
           const expectedTitle = (next && (next.spotifyTitle || next.title || source)) || source;
           const expectedArtist = (next && next.spotifyArtist) || '';
 
-          const results = await play.search(source, { limit: strictSpotify ? 8 : 1, timeoutMs: strictSpotify ? 2800 : 1700 });
+          const results = await play.search(source, { limit: strictSpotify ? 8 : 1, timeoutMs: strictSpotify ? 2800 : 1200 });
           if (!results || results.length === 0) throw new Error(`No results found for: "${source}"`);
 
           let picked = results[0];
@@ -1075,11 +1084,15 @@ class MusicPlayer extends EventEmitter {
         state.resource       = resource;
         state.currentProcess = streamInfo.process || null;
         applyEffectiveVolumeToState(state);
+        this._resolveTrackMetadataInBackground(next);
 
         // Maintain history keys to reduce repeat recommendations.
         this._rememberPlayed(state, next);
 
         try { this.emit('trackStart', guildId, next); } catch (e) {}
+
+        // Pre-resolve next track in background for faster skip
+        this._preResolveNext(guildId);
       } catch (err) {
         console.error('[player] Failed to stream track — skipping:', err && err.message ? err.message : err);
         state._needsPlayNext = true;
@@ -1104,6 +1117,56 @@ class MusicPlayer extends EventEmitter {
           setImmediate(() => this._playNext(guildId));
         }
       }
+    }
+  }
+
+  // ─── Pre-resolve next track ──────────────────────────────────────────────────
+
+  /**
+   * Pre-resolve the next track in queue (search → URL) in the background.
+   * When skip is triggered, the URL is already resolved so streaming starts faster.
+   * @param {string} guildId
+   */
+  async _preResolveNext(guildId) {
+    try {
+      const state = this.guilds.get(guildId);
+      if (!state || state.queue.length === 0) return;
+
+      const next = state.queue[0];
+      if (!next) return;
+      // Already has a URL — no resolution needed
+      if (next.url && /^https?:\/\//i.test(next.url)) return;
+
+      const source = next.search || next.query || next.title || '';
+      if (!source) return;
+
+      const strictSpotify = !!(next.strictSearch && next.sourceHint === 'spotify');
+      const expectedTitle = next.spotifyTitle || next.title || source;
+      const expectedArtist = next.spotifyArtist || '';
+
+      const results = await play.search(source, { limit: strictSpotify ? 8 : 3, timeoutMs: 3500 });
+      if (!results || results.length === 0) return;
+
+      let picked = results[0];
+      if (strictSpotify) {
+        const best = this._pickBestSearchResult(results, expectedTitle, expectedArtist);
+        if (best) picked = best;
+      }
+
+      // Verify the track is still first in queue (user might have modified queue)
+      if (state.queue[0] !== next) return;
+
+      // Fill metadata
+      if (!next.url) next.url = picked.url;
+      if (!next.title || next.title === source) next.title = picked.title;
+      if (!next.author && picked.author) next.author = picked.author;
+      if (!next.duration && picked.duration) next.duration = picked.duration;
+      if (!next.thumbnail && picked.thumbnail) next.thumbnail = picked.thumbnail;
+      next._preResolved = true;
+
+      console.log('[player] Pre-resolved next track:', picked.title || picked.url);
+    } catch (err) {
+      // Pre-resolve is best-effort; failures are fine
     }
   }
 
@@ -1373,7 +1436,27 @@ class MusicPlayer extends EventEmitter {
 
   _extractVideoId(url) {
     if (!url) return null;
-    const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/))([^&?#]+)/);
+    const text = String(url || '').trim();
+    if (!text) return null;
+
+    const shortMatch = text.match(/youtu\.be\/([^?&#/]+)/i);
+    if (shortMatch) return shortMatch[1];
+
+    try {
+      const parsed = new URL(text);
+      const host = String(parsed.hostname || '').replace(/^www\./i, '').toLowerCase();
+      if (host.endsWith('youtube.com')) {
+        const vParam = parsed.searchParams.get('v');
+        if (vParam) return vParam;
+        const path = String(parsed.pathname || '');
+        const pathMatch = path.match(/\/(?:embed|v|shorts)\/([^/?#]+)/i);
+        if (pathMatch) return pathMatch[1];
+      }
+    } catch (e) {
+      // ignore parse errors
+    }
+
+    const match = text.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|music\.youtube\.com\/watch\?v=)([^&?#]+)/i);
     return match ? match[1] : null;
   }
 
