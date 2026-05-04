@@ -34,6 +34,7 @@ const path = require('path');
 const PLAYER_STATE_FILE = path.join(process.cwd(), 'data', 'player-state.json');
 const RESTORE_QUEUE_ON_BOOT = false;
 const RESTORE_AUTOMATION_ON_BOOT = false;
+const DEFAULT_AUTOPLAY_ENABLED = true;
 const METADATA_LOOKUP_TIMEOUT_MS = Math.max(800, Number(process.env.METADATA_LOOKUP_TIMEOUT_MS) || 2500);
 
 const AUDIO_PRESET_CONFIG = Object.freeze({
@@ -332,7 +333,7 @@ class MusicPlayer extends EventEmitter {
 
       state.loopMode = ['none', 'track', 'queue'].includes(snapshot.loopMode) ? snapshot.loopMode : 'none';
       state.shuffle = !!snapshot.shuffle;
-      state.autoplay = RESTORE_AUTOMATION_ON_BOOT ? !!snapshot.autoplay : false;
+      state.autoplay = RESTORE_AUTOMATION_ON_BOOT ? !!snapshot.autoplay : DEFAULT_AUTOPLAY_ENABLED;
       state.audioPreset = normalizeAudioPresetName(snapshot.audioPreset);
       state.stay24h = !!snapshot.stay24h;
 
@@ -347,6 +348,9 @@ class MusicPlayer extends EventEmitter {
       state.lastPlayed = Array.isArray(snapshot.lastPlayed)
         ? snapshot.lastPlayed.filter((item) => typeof item === 'string').slice(-100)
         : [];
+
+      // Enforce default autoplay on boot.
+      state.autoplay = DEFAULT_AUTOPLAY_ENABLED;
 
     } catch (err) {
       console.warn(`[player] failed to apply snapshot for guild ${guildId}:`, err && err.message ? err.message : err);
@@ -378,7 +382,7 @@ class MusicPlayer extends EventEmitter {
         volume:         0.2,     // Default to 20% (0.2)
         loopMode:       'none',  // 'none', 'track', 'queue'
         shuffle:        false,
-        autoplay:       false,
+        autoplay:       DEFAULT_AUTOPLAY_ENABLED,
         audioPreset:    'flat',  // audio processing mode (EQ-style preset)
         radio:          { enabled: false, keyword: null },
         stay24h:        false,
