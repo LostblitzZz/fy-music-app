@@ -310,6 +310,15 @@ function applyStaticPresence() {
   } catch (e) {}
 }
 
+function formatGuildLabel(guildId) {
+  if (!guildId) return 'unknown guild';
+  const guild = client && client.guilds && client.guilds.cache
+    ? client.guilds.cache.get(guildId)
+    : null;
+  if (!guild) return `${guildId} (unknown guild)`;
+  return `${guild.name} (${guild.id})`;
+}
+
 async function clearVoiceStatus(guildId, { retry = true, channelId: overrideChannelId } = {}) {
   const guild = client.guilds.cache.get(guildId);
   const currentChannelId = guild && guild.members && guild.members.me
@@ -483,6 +492,14 @@ client.once('clientReady', async () => {
 
   applyStaticPresence();
 
+  const cachedGuilds = client.guilds.cache.map(g => `${g.name} (${g.id})`);
+  if (cachedGuilds.length > 0) {
+    console.log('[bot] Cached guilds:');
+    for (const label of cachedGuilds) {
+      console.log(' -', label);
+    }
+  }
+
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
   // Register to each guild for instant propagation (vs. global which takes ~1h)
@@ -494,9 +511,9 @@ client.once('clientReady', async () => {
   for (const gid of guilds) {
     try {
       await rest.put(Routes.applicationGuildCommands(client.user.id, gid), { body: slashCommands });
-      console.log('[bot] Registered slash commands to guild', gid);
+      console.log('[bot] Registered slash commands to guild', formatGuildLabel(gid));
     } catch (err) {
-      console.warn('[bot] Failed registering commands to guild', gid, err && err.message ? err.message : err);
+      console.warn('[bot] Failed registering commands to guild', formatGuildLabel(gid), err && err.message ? err.message : err);
     }
   }
 });
@@ -520,7 +537,7 @@ client.on('guildCreate', async (guild) => {
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     await rest.put(Routes.applicationGuildCommands(client.user.id, guild.id), { body: slashCommands });
-    console.log('[bot] Registered slash commands to new guild', guild.id);
+    console.log('[bot] Registered slash commands to new guild', `${guild.name} (${guild.id})`);
   } catch (err) {
     console.warn('[bot] Failed registering commands on guildCreate:', err && err.message ? err.message : err);
   }
