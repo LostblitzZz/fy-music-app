@@ -180,6 +180,10 @@ const RADIO_STATIONS = [
 
 // ── Client ────────────────────────────────────────────────────────────────────
 const PREFIX = process.env.PREFIX || '!';
+const OWNER_IDS = String(process.env.OWNER_IDS || process.env.OWNER_ID || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
 
 const client = new Client({
   intents: [
@@ -240,6 +244,7 @@ const COMMAND_COOLDOWN_MS = {
   help: 400,
   health: 800,
   button: 700,
+  monitor: 10000,
 };
 
 const AUTOCOMPLETE_CACHE_TTL_MS = 4 * 60 * 1000;
@@ -319,6 +324,11 @@ function formatGuildLabel(guildId) {
   return `${guild.name} (${guild.id})`;
 }
 
+function isOwner(userId) {
+  if (!userId || OWNER_IDS.length === 0) return false;
+  return OWNER_IDS.includes(String(userId));
+}
+
 async function clearVoiceStatus(guildId, { retry = true, channelId: overrideChannelId } = {}) {
   const guild = client.guilds.cache.get(guildId);
   const currentChannelId = guild && guild.members && guild.members.me
@@ -348,6 +358,124 @@ async function clearVoiceStatus(guildId, { retry = true, channelId: overrideChan
 
   if (voiceStatusChannels.get(guildId) === channelId) {
     voiceStatusChannels.delete(guildId);
+  }
+}
+
+function formatVoiceMemberStatus(member) {
+  const voice = member && member.voice ? member.voice : null;
+  if (!voice) return '';
+
+  const flags = [];
+  if (voice.selfMute || voice.mute) flags.push('Muted');
+  if (voice.selfDeaf || voice.deaf) flags.push('Deafened');
+  if (voice.streaming) flags.push('Streaming');
+  if (voice.selfVideo) flags.push('Video');
+
+  if (flags.length === 0) return '';
+  return ` [${flags.join(', ')}]`;
+}
+
+function splitLinesToChunks(lines, maxLen) {
+  const chunks = [];
+  let current = '';
+
+  const flush = () => {
+    if (current) {
+      chunks.push(current);
+      current = '';
+    }
+  };
+
+  for (const raw of lines) {
+    const line = String(raw || '');
+    if (!line) continue;
+
+    if (line.length > maxLen) {
+      flush();
+      let cursor = 0;
+      while (cursor < line.length) {
+        chunks.push(line.slice(cursor, cursor + maxLen));
+        cursor += maxLen;
+      }
+      continue;
+    }
+
+    if (current.length + line.length + 1 > maxLen) {
+      flush();
+    }
+
+    current = current ? `${current}\n${line}` : line;
+  }
+
+  flush();
+  return chunks;
+}
+
+async function buildVoiceReportForGuild(guild) {
+  if (!guild) return { hasMembers: false, lines: [] };
+
+  let channels;
+  try {
+    channels = await guild.channels.fetch();
+  } catch (err) {
+    console.warn('[bot] Failed to fetch channels for', formatGuildLabel(guild.id), err && err.message ? err.message : err);
+    return { hasMembers: false, lines: [] };
+  }
+
+  const voiceChannels = Array.from(channels.values())
+    .filter((channel) => channel && typeof channel.isVoiceBased === 'function' && channel.isVoiceBased() && channel.members)
+    .sort((a, b) => {
+      const pos = (a.rawPosition || 0) - (b.rawPosition || 0);
+      if (pos !== 0) return pos;
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+
+  const lines = [`🌐 **Server: ${guild.name}**`];
+  let hasMembers = false;
+
+  for (const channel of voiceChannels) {
+    if (!channel.members || channel.members.size === 0) continue;
+    hasMembers = true;
+    lines.push(`🔊 **${channel.name}**:`);
+
+    for (const member of channel.members.values()) {
+      const status = formatVoiceMemberStatus(member);
+      lines.push(` ├─ ${member.displayName}${status}`);
+    }
+
+    lines.push('');
+  }
+
+  while (lines.length > 0 && !String(lines[lines.length - 1]).trim()) {
+    lines.pop();
+  }
+
+  return { hasMembers, lines };
+}
+
+async function sendVoiceMonitorReport(sendFn) {
+  const guilds = Array.from(client.guilds.cache.values());
+  if (guilds.length === 0) {
+    await sendFn('Bot belum bergabung ke server mana pun.');
+    return;
+  }
+
+  let activeGuilds = 0;
+  for (const guild of guilds) {
+    const report = await buildVoiceReportForGuild(guild);
+    if (!report.hasMembers) continue;
+
+    activeGuilds += 1;
+    const chunks = splitLinesToChunks(report.lines, 1900);
+    for (const chunk of chunks) {
+      await sendFn(chunk);
+    }
+  }
+
+  if (activeGuilds === 0) {
+    await sendFn('Saat ini voice channel sepi di semua server.');
+  } else {
+    await sendFn('✅ Pantauan selesai.');
   }
 }
 
@@ -1006,6 +1134,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ embeds: [makeHealthEmbed(player, client, interaction.guildId, AUDIO_PRESET_LABEL_MAP)], flags: MessageFlags.Ephemeral });
     }
 
+
     // /help
     if (commandName === 'help') {
       const lines = [
@@ -1044,13 +1173,38 @@ client.on('messageCreate', async (message) => {
   try {
     if (message.author.bot) return;
     if (!message.content.startsWith(PREFIX)) return;
-    if (!message.guild) return;
 
     const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
     const cmd  = args.shift().toLowerCase();
 
     /** Quick reply helper */
     const reply = (payload) => message.reply(payload).catch(() => {});
+
+    const isDM = !message.guild;
+    if (isDM) {
+      if (cmd !== 'pantausemua' && cmd !== 'pantau') return;
+      if (OWNER_IDS.length === 0) {
+        return reply({ embeds: [makeEmbed('❌ Error', 'OWNER_ID belum di-set di .env.')] });
+      }
+      if (!isOwner(message.author.id)) {
+        return reply({ embeds: [makeEmbed('❌ Error', 'Command ini hanya untuk owner bot.')] });
+      }
+
+      const remain = getCooldownRemainingMs(
+        message.author.id,
+        'dm',
+        'prefix:monitor',
+        COMMAND_COOLDOWN_MS.monitor
+      );
+      if (remain > 0) {
+        return reply({ embeds: [makeEmbed('⏳ Cooldown', makeCooldownNotice(remain, `menggunakan ${PREFIX}${cmd}`))] });
+      }
+
+      await reply({ content: '🔍 Memulai pantauan voice di semua server...' });
+      const send = (content) => message.channel.send({ content }).catch(() => {});
+      await sendVoiceMonitorReport(send);
+      return;
+    }
 
     const prefixCooldownKeyMap = {
       play: 'play',
@@ -1089,6 +1243,7 @@ client.on('messageCreate', async (message) => {
         return reply({ embeds: [makeEmbed('⏳ Cooldown', makeCooldownNotice(remain, `menggunakan ${PREFIX}${cmd}`))] });
       }
     }
+
 
     // ── !play ──────────────────────────────────────────────────────────────────
     if (cmd === 'play') {
