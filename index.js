@@ -110,6 +110,7 @@ const {
   MessageFlags,
   REST,
   Routes,
+  Partials,
 } = require('discord.js');
 
 const MusicPlayer = require('./player');
@@ -191,7 +192,9 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,  // Required to read message content for prefix commands
+    GatewayIntentBits.DirectMessages,
   ],
+  partials: [Partials.Channel],
 });
 
 const player = new MusicPlayer();
