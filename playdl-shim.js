@@ -199,6 +199,35 @@ function isYouTubeLike(input) {
   return /youtube\.com|youtu\.be|music\.youtube\.com/.test(text);
 }
 
+function isSoundCloudLike(input) {
+  const text = String(input || '').toLowerCase();
+  return text.includes('soundcloud.com');
+}
+
+function normalizeSoundCloudUrl(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return raw;
+
+  const candidate = /^https?:\/\//i.test(raw)
+    ? raw
+    : `https://${raw.replace(/^\/+/, '')}`;
+
+  try {
+    const url = new URL(candidate);
+    const host = String(url.hostname || '').replace(/^www\./i, '').toLowerCase();
+    if (!host.endsWith('soundcloud.com')) return raw;
+
+    const allowed = new Set(['secret_token', 't', 'in']);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (!allowed.has(key)) url.searchParams.delete(key);
+    }
+    url.hash = '';
+    return url.toString();
+  } catch (e) {
+    return raw;
+  }
+}
+
 function normalizePlayableTarget(input) {
   const value = String(input || '');
   if (!value) return value;
@@ -206,6 +235,7 @@ function normalizePlayableTarget(input) {
   // Keep search/result URLs in YouTube Music for UX, but stream from watch URL
   // to reduce throttling stalls that can cause premature idle transitions.
   if (isYouTubeLike(value)) return toWatchYouTubeUrl(value);
+  if (isSoundCloudLike(value)) return normalizeSoundCloudUrl(value);
   return value;
 }
 
@@ -266,6 +296,7 @@ function prioritizeLikelyMusicEntries(entries) {
 const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || 'youtube:player_client=web,web_safari';
 const YTDLP_JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES || 'node';
 const YTDLP_SEARCH_EXTRACTOR_ARGS = process.env.YTDLP_SEARCH_EXTRACTOR_ARGS || 'youtube:player_client=web_music';
+const SOUNDCLOUD_CLIENT_ID = process.env.SOUNDCLOUD_CLIENT_ID || '';
 
 const SEARCH_CACHE_TTL_MS = Math.max(3000, Number(process.env.SEARCH_CACHE_TTL_MS) || 60000);
 const SEARCH_CACHE_MAX_SIZE = Math.max(25, Number(process.env.SEARCH_CACHE_MAX_SIZE) || 300);
@@ -443,10 +474,15 @@ module.exports = {
         const startAtSeconds = ENABLE_STREAM_SEEK ? requestedStartAtSeconds : 0;
         const needsSeek = ENABLE_STREAM_SEEK && startAtSeconds > 0.5;
 
+        const isSoundCloud = isSoundCloudLike(spawnTarget);
+        const formatSelector = isSoundCloud
+          ? 'http_mp3_128/bestaudio/best'
+          : 'ba[ext=m4a]/ba/ba*[ext=m4a]/18/22/best[ext=mp4][protocol=https]/best';
+
         // Stability-first format selection: progressive mp4 tends to be more reliable
         // than segmented adaptive streams for long Discord playback sessions.
         const args = [
-          '-f', 'ba[ext=m4a]/ba/ba*[ext=m4a]/18/22/best[ext=mp4][protocol=https]/best',
+          '-f', formatSelector,
           '-o', '-',
           '--no-playlist',
           '--no-part',
@@ -454,10 +490,21 @@ module.exports = {
           '--retries', 'infinite',
           '--fragment-retries', '25',
           '--retry-sleep', 'fragment:exp=1:20',
-          '--extractor-args', YTDLP_EXTRACTOR_ARGS,
-          '--js-runtimes', YTDLP_JS_RUNTIMES,
-          spawnTarget,
         ];
+
+        if (YTDLP_EXTRACTOR_ARGS) {
+          args.push('--extractor-args', YTDLP_EXTRACTOR_ARGS);
+        }
+
+        if (isSoundCloud && SOUNDCLOUD_CLIENT_ID) {
+          args.push('--extractor-args', `soundcloud:client_id=${SOUNDCLOUD_CLIENT_ID}`);
+        }
+
+        if (ffmpegPath) {
+          args.push('--ffmpeg-location', ffmpegPath);
+        }
+
+        args.push('--js-runtimes', YTDLP_JS_RUNTIMES, spawnTarget);
 
         console.log('[playdl-shim] spawning yt-dlp for:', spawnTarget);
         const proc = spawn(ytdlpPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
