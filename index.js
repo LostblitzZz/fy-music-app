@@ -202,6 +202,7 @@ const activeMessages = new Map(); // guildId -> { messageId, channelId, interval
 const commandCooldowns = new Map();
 const autocompleteCache = new Map(); // url -> { title, author, duration, thumbnail, savedAt }
 const voiceStatusChannels = new Map(); // guildId -> channelId
+const userInputLog = [];
 
 const AUDIO_PRESET_CATALOG = typeof player.getAudioPresetCatalog === 'function'
   ? player.getAudioPresetCatalog()
@@ -248,10 +249,13 @@ const COMMAND_COOLDOWN_MS = {
   health: 800,
   button: 700,
   monitor: 10000,
+  userinput: 4000,
+  dmleave: 2000,
 };
 
 const AUTOCOMPLETE_CACHE_TTL_MS = 4 * 60 * 1000;
 const AUTOCOMPLETE_CACHE_MAX = 300;
+const USER_INPUT_LOG_MAX = 200;
 
 const STATIC_ACTIVITY_LABEL = String(process.env.STATIC_ACTIVITY || 'Musik');
 
@@ -330,6 +334,42 @@ function formatGuildLabel(guildId) {
 function isOwner(userId) {
   if (!userId || OWNER_IDS.length === 0) return false;
   return OWNER_IDS.includes(String(userId));
+}
+
+function logUserInput({ userId, userTag, guildId, command, input }) {
+  const entry = {
+    at: Date.now(),
+    userId: String(userId || '').trim(),
+    userTag: String(userTag || '').trim(),
+    guildId: guildId ? String(guildId) : null,
+    command: String(command || '').trim(),
+    input: String(input || '').trim(),
+  };
+
+  if (!entry.userId || !entry.command || !entry.input) return;
+
+  userInputLog.push(entry);
+  if (userInputLog.length > USER_INPUT_LOG_MAX) {
+    userInputLog.splice(0, userInputLog.length - USER_INPUT_LOG_MAX);
+  }
+}
+
+function buildUserInputLines(limit) {
+  if (userInputLog.length === 0) return [];
+
+  const safeLimit = Math.max(1, Math.min(50, Number(limit) || 20));
+  const items = userInputLog.slice(-safeLimit).reverse();
+  const lines = [`🧾 User input terakhir (${items.length}/${userInputLog.length})`];
+
+  items.forEach((entry, idx) => {
+    const ts = new Date(entry.at).toISOString().replace('T', ' ').replace('Z', '');
+    const guildLabel = entry.guildId ? formatGuildLabel(entry.guildId) : 'DM';
+    const userLabel = entry.userTag ? `${entry.userTag} (${entry.userId})` : entry.userId;
+    const inputText = clampText(entry.input || '-', 120);
+    lines.push(`${idx + 1}) ${ts} | ${guildLabel} | ${userLabel} | ${entry.command}: ${inputText}`);
+  });
+
+  return lines;
 }
 
 async function clearVoiceStatus(guildId, { retry = true, channelId: overrideChannelId } = {}) {
@@ -419,6 +459,7 @@ async function buildVoiceReportForGuild(guild) {
 
   let channels;
   try {
+    try { await guild.voiceStates.fetch(); } catch (e) {}
     channels = await guild.channels.fetch();
   } catch (err) {
     console.warn('[bot] Failed to fetch channels for', formatGuildLabel(guild.id), err && err.message ? err.message : err);
@@ -934,6 +975,14 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
+      logUserInput({
+        userId: interaction.user.id,
+        userTag: interaction.user.tag,
+        guildId: interaction.guildId,
+        command: '/play',
+        input: query,
+      });
+
       const memberVC = ensureMemberVC();
 
       // Permission check
@@ -1185,12 +1234,65 @@ client.on('messageCreate', async (message) => {
 
     const isDM = !message.guild;
     if (isDM) {
-      if (cmd !== 'pantausemua' && cmd !== 'pantau') return;
+      if (cmd !== 'pantausemua' && cmd !== 'pantau' && cmd !== 'userinput' && cmd !== 'leave') return;
       if (OWNER_IDS.length === 0) {
         return reply({ embeds: [makeEmbed('❌ Error', 'OWNER_ID belum di-set di .env.')] });
       }
       if (!isOwner(message.author.id)) {
         return reply({ embeds: [makeEmbed('❌ Error', 'Command ini hanya untuk owner bot.')] });
+      }
+
+      if (cmd === 'leave') {
+        const remain = getCooldownRemainingMs(
+          message.author.id,
+          'dm',
+          'prefix:dmleave',
+          COMMAND_COOLDOWN_MS.dmleave
+        );
+        if (remain > 0) {
+          return reply({ embeds: [makeEmbed('⏳ Cooldown', makeCooldownNotice(remain, `menggunakan ${PREFIX}${cmd}`))] });
+        }
+
+        const targetGuildId = String(args[0] || '').trim();
+        if (!/^\d{5,25}$/.test(targetGuildId)) {
+          return reply({ embeds: [makeEmbed('❌ Error', `Gunakan: ${PREFIX}leave <guildId>`)] });
+        }
+
+        const guild = client.guilds.cache.get(targetGuildId);
+        if (!guild) {
+          return reply({ embeds: [makeEmbed('❌ Error', 'Guild tidak ditemukan di cache. Pastikan bot sudah join server tersebut.')] });
+        }
+
+        player.setStay24h(guild.id, false);
+        player.stop(guild.id, { forceLeave: true });
+        clearVoiceStatus(guild.id);
+        applyStaticPresence();
+
+        return reply({ embeds: [makeEmbed('👋 Leave', `Bot keluar dari voice di **${guild.name}** (${guild.id}).`)] });
+      }
+
+      if (cmd === 'userinput') {
+        const remain = getCooldownRemainingMs(
+          message.author.id,
+          'dm',
+          'prefix:userinput',
+          COMMAND_COOLDOWN_MS.userinput
+        );
+        if (remain > 0) {
+          return reply({ embeds: [makeEmbed('⏳ Cooldown', makeCooldownNotice(remain, `menggunakan ${PREFIX}${cmd}`))] });
+        }
+
+        const limit = parseInt(args[0], 10);
+        const lines = buildUserInputLines(limit);
+        if (lines.length === 0) {
+          return reply({ content: 'Belum ada input user tercatat.' });
+        }
+
+        const chunks = splitLinesToChunks(lines, 1900);
+        for (const chunk of chunks) {
+          await message.channel.send({ content: chunk });
+        }
+        return;
       }
 
       const remain = getCooldownRemainingMs(
@@ -1252,6 +1354,14 @@ client.on('messageCreate', async (message) => {
     if (cmd === 'play') {
       const query = args.join(' ');
       if (!query) return reply({ embeds: [makeEmbed('❌ Error', 'Please provide a song name or link.')] });
+
+      logUserInput({
+        userId: message.author.id,
+        userTag: message.author.tag,
+        guildId: message.guild.id,
+        command: '!play',
+        input: query,
+      });
 
       const memberVC = message.member && message.member.voice ? message.member.voice.channel : null;
       if (!memberVC) return reply({ embeds: [makeEmbed('❌ Error', 'You must be in a voice channel.')] });
