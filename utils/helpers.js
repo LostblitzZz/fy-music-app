@@ -56,6 +56,7 @@ function cleanTitle(title) {
   return String(title)
     .replace(/\[(?:official|video|audio|lyrics?|lirik|terjemahan|translation|hd|4k)[^\]]*\]/gi, ' ')
     .replace(/\((?:official|video|audio|lyrics?|lirik|terjemahan|translation|hd|4k)[^)]*\)/gi, ' ')
+    .replace(/\b(official\s+(?:music\s+)?video|official\s+audio|official\s+lyrics?|music\s+video|lyric\s+video|lyrics?\s+video)\b/gi, ' ')
     .replace(/\s*[-|]\s*(?:official|video|audio|lyrics?|lirik|terjemahan|translation).*/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();

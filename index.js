@@ -141,7 +141,14 @@ const spotifyFetch = typeof globalThis.fetch === 'function'
   : (...args) => import('node-fetch').then(({ default: fetchFn }) => fetchFn(...args));
 
 // Initialize lyrics engine
-lyricsEngine.init({ geniusClient, lyricsFinder: lyricsFinderLib, spotifyFetch });
+const musixmatchKey = process.env.MUSIXMATCH_API_KEY || process.env.MUSIXMATCH_KEY || '';
+lyricsEngine.init({
+  geniusClient,
+  lyricsFinder: lyricsFinderLib,
+  spotifyFetch,
+  musixmatchKey,
+  resolveTrackInfo: (url) => playShim.getInfo(url),
+});
 
 let spotifyClient = null;
 (async () => {
@@ -243,6 +250,7 @@ const COMMAND_COOLDOWN_MS = {
   radio: 1600,
   autoplay: 1000,
   lyrics: 1800,
+  lyricsset: 2200,
   queue: 500,
   np: 500,
   help: 400,
@@ -644,6 +652,13 @@ const slashCommands = [
   { name: 'autoplay', description: 'Toggle autoplay mode (related songs)' },
   { name: 'lyrics', description: 'Search lyrics for the current song' },
   {
+    name: 'lyricsset',
+    description: 'Simpan lirik manual untuk lagu yang sedang diputar',
+    options: [
+      { name: 'text', type: 3, description: 'Tempel lirik di sini', required: true },
+    ],
+  },
+  {
     name: 'volume',
     description: 'Atur volume bot (0-100)',
     options: [{ name: 'level', type: 4, description: 'Level volume (0-100)', required: true, min_value: 0, max_value: 100 }],
@@ -931,6 +946,7 @@ client.on('interactionCreate', async (interaction) => {
     radio: 'radio',
     autoplay: 'autoplay',
     lyrics: 'lyrics',
+    lyricsset: 'lyricsset',
     volume: 'volume',
     preset: 'preset',
     help: 'help',
@@ -1141,6 +1157,26 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.editReply(payload);
     }
 
+    // /lyricsset
+    if (commandName === 'lyricsset') {
+      const q = player.getQueue(interaction.guildId);
+      if (!q.playing) return interaction.reply({ content: '❌ Tidak ada lagu yang sedang diputar.', flags: MessageFlags.Ephemeral });
+
+      const rawLyrics = String(interaction.options.getString('text', true) || '').trim();
+      if (!rawLyrics) {
+        return interaction.reply({ content: '❌ Lirik kosong tidak bisa disimpan.', flags: MessageFlags.Ephemeral });
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const result = lyricsEngine.setLyricsOverride(q.playing, rawLyrics, { addedBy: interaction.user.tag });
+      if (!result || !result.ok) {
+        return interaction.editReply({ embeds: [makeEmbed('📃 Lyrics', result && result.reason ? result.reason : 'Gagal menyimpan lirik.')] });
+      }
+
+      const payload = lyricsEngine.makeLyricsResultMessage(q.playing, result, interaction.user.id, interaction.guildId);
+      return interaction.editReply(payload);
+    }
+
     // /volume
     if (commandName === 'volume') {
       const level = interaction.options.getInteger('level', true);
@@ -1198,6 +1234,8 @@ client.on('interactionCreate', async (interaction) => {
         '`/np` — Show now playing',
         '`/radio` — Pilih stasiun radio genre',
         '`/autoplay` — Toggle autoplay (related songs)',
+        '`/lyrics` — Cari lirik lagu yang sedang diputar',
+        '`/lyricsset` — Simpan lirik manual untuk lagu yang sedang diputar',
         '`/volume <0-100>` — Set bot volume',
         '`/preset <mode>` — Set audio preset/EQ',
         '`/health` — Show bot diagnostics',
@@ -1325,6 +1363,8 @@ client.on('messageCreate', async (message) => {
       ap: 'autoplay',
       lyrics: 'lyrics',
       ly: 'lyrics',
+      lyricsset: 'lyricsset',
+      lyset: 'lyricsset',
       volume: 'volume',
       vol: 'volume',
       preset: 'preset',
@@ -1528,6 +1568,25 @@ client.on('messageCreate', async (message) => {
       return wait ? wait.edit({ content: null, ...payload }) : reply(payload);
     }
 
+    // ── !lyricsset ───────────────────────────────────────────────────────────
+    if (cmd === 'lyricsset' || cmd === 'lyset') {
+      const q = player.getQueue(message.guild.id);
+      if (!q.playing) return reply({ embeds: [makeEmbed('❌ Error', 'Tidak ada lagu yang sedang diputar.')] });
+
+      const rawLyrics = String(args.join(' ') || '').trim();
+      if (!rawLyrics) {
+        return reply({ embeds: [makeEmbed('❌ Error', `Gunakan: ${PREFIX}lyricsset <lirik>`)] });
+      }
+
+      const result = lyricsEngine.setLyricsOverride(q.playing, rawLyrics, { addedBy: message.author.tag });
+      if (!result || !result.ok) {
+        return reply({ embeds: [makeEmbed('📃 Lyrics', result && result.reason ? result.reason : 'Gagal menyimpan lirik.')] });
+      }
+
+      const payload = lyricsEngine.makeLyricsResultMessage(q.playing, result, message.author.id, message.guild.id);
+      return reply(payload);
+    }
+
     // ── !volume ───────────────────────────────────────────────────────────────
     if (cmd === 'volume' || cmd === 'vol') {
       const level = parseInt(args[0]);
@@ -1580,6 +1639,8 @@ client.on('messageCreate', async (message) => {
         '`!radio <keyword>` — Start radio autoplay',
         '`!radio stop` — Stop radio',
         '`!autoplay` — Toggle autoplay mode',
+        '`!lyrics` — Cari lirik lagu yang sedang diputar',
+        '`!lyricsset <lirik>` — Simpan lirik manual untuk lagu yang sedang diputar',
         '`!volume <0-100>` — Set bot volume',
         '`!preset <mode>` / `!eq <mode>` — Set audio preset',
         '`!health` — Show bot diagnostics',

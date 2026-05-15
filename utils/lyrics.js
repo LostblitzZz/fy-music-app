@@ -1,6 +1,9 @@
 // Credit by Raitzu
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 const {
   EmbedBuilder,
   ActionRowBuilder,
@@ -25,18 +28,66 @@ const LYRICS_PAGE_MAX_CHARS = 1500;
 const LYRICS_MAX_PAGES = 10;
 const LYRICS_SESSION_TTL_MS = 12 * 60 * 1000;
 const LYRICS_MAX_SESSIONS = 250;
+const LYRICS_OVERRIDE_FILE = path.join(process.cwd(), 'data', 'lyrics-overrides.json');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 const lyricsSessions = new Map();
+const lyricsOverrides = new Map();
 let _geniusClient = null;
 let _lyricsFinder = null;
 let _spotifyFetch = null;
+let _musixmatchKey = null;
+let _resolveTrackInfo = null;
 
-function init({ geniusClient, lyricsFinder, spotifyFetch }) {
+function init({ geniusClient, lyricsFinder, spotifyFetch, musixmatchKey, resolveTrackInfo } = {}) {
   _geniusClient = geniusClient || null;
   _lyricsFinder = lyricsFinder || null;
   _spotifyFetch = spotifyFetch || null;
+  _musixmatchKey = musixmatchKey || process.env.MUSIXMATCH_API_KEY || process.env.MUSIXMATCH_KEY || null;
+  _resolveTrackInfo = typeof resolveTrackInfo === 'function' ? resolveTrackInfo : null;
+}
+
+function loadLyricsOverrides() {
+  try {
+    if (!fs.existsSync(LYRICS_OVERRIDE_FILE)) return;
+    const raw = fs.readFileSync(LYRICS_OVERRIDE_FILE, 'utf8');
+    if (!raw || !raw.trim()) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!key || !value || typeof value !== 'object') continue;
+      if (typeof value.lyrics !== 'string' || !value.lyrics.trim()) continue;
+      lyricsOverrides.set(String(key), {
+        lyrics: String(value.lyrics),
+        title: value.title ? String(value.title) : '',
+        artist: value.artist ? String(value.artist) : '',
+        addedBy: value.addedBy ? String(value.addedBy) : '',
+        addedAt: Number(value.addedAt) || 0,
+      });
+    }
+  } catch (err) {
+    console.warn('[lyrics] failed to load overrides:', err && err.message ? err.message : err);
+  }
+}
+
+function saveLyricsOverrides() {
+  try {
+    fs.mkdirSync(path.dirname(LYRICS_OVERRIDE_FILE), { recursive: true });
+    const payload = {};
+    for (const [key, value] of lyricsOverrides.entries()) {
+      payload[key] = {
+        lyrics: value.lyrics,
+        title: value.title || '',
+        artist: value.artist || '',
+        addedBy: value.addedBy || '',
+        addedAt: Number(value.addedAt) || 0,
+      };
+    }
+    fs.writeFileSync(LYRICS_OVERRIDE_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[lyrics] failed to save overrides:', err && err.message ? err.message : err);
+  }
 }
 
 // ── Text helpers ──────────────────────────────────────────────────────────────
@@ -70,12 +121,50 @@ function isLikelyArtistSegment(segment, artistCandidates) {
   return false;
 }
 
-function inferArtistTitleFromName(rawTitle) {
-  const value = cleanTitle(rawTitle);
-  const match = value.match(/^(.{2,90}?)\s*[-:|]\s*(.{2,200})$/);
+function normalizeTitleSeparators(value) {
+  return String(value || '')
+    .replace(/[:|]/g, '-')
+    .replace(/\s*-\s*/g, ' - ')
+    .replace(/(?:\s*-\s*){2,}/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function inferArtistTitleFromName(rawTitle, rawArtistHint) {
+  const value = normalizeTitleSeparators(cleanTitle(rawTitle));
+  const match = value.match(/^(.{2,90}?)\s*-\s*(.{2,200})$/);
   if (!match) return null;
-  const artist = cleanArtistName(match[1]);
-  const title = cleanLyricsTitle(match[2]);
+  const leftRaw = match[1];
+  const rightRaw = match[2];
+
+  const leftArtist = cleanArtistName(leftRaw);
+  const rightArtist = cleanArtistName(rightRaw);
+  const leftTitle = cleanLyricsTitle(leftRaw);
+  const rightTitle = cleanLyricsTitle(rightRaw);
+
+  let artist = leftArtist;
+  let title = rightTitle;
+
+  const hint = cleanArtistName(rawArtistHint || '');
+  if (hint) {
+    const hintNorm = normalizeLookupText(hint);
+    const leftNorm = normalizeLookupText(leftArtist);
+    const rightNorm = normalizeLookupText(rightArtist);
+    const leftOverlap = tokenOverlapRatio(hintNorm, leftNorm);
+    const rightOverlap = tokenOverlapRatio(hintNorm, rightNorm);
+    if (rightOverlap > leftOverlap && rightOverlap >= 0.4) {
+      artist = rightArtist || rightTitle;
+      title = leftTitle || rightTitle;
+    }
+  } else {
+    const shortLeft = leftTitle && leftTitle.length <= 3;
+    const longRight = rightArtist && rightArtist.length >= 4;
+    if (shortLeft && longRight) {
+      artist = rightArtist || rightTitle;
+      title = leftTitle || rightTitle;
+    }
+  }
+
   if (!artist || !title) return null;
   return { artist, title };
 }
@@ -84,7 +173,7 @@ function parseLyricsTarget(track) {
   if (!track) return { title: '', artist: '' };
   const rawTitle = String(track.spotifyTitle || track.title || track.search || '').trim();
   const rawArtist = String(track.spotifyArtist || track.author || '').trim();
-  const parsedFromName = inferArtistTitleFromName(track.title || rawTitle);
+  const parsedFromName = inferArtistTitleFromName(track.title || rawTitle, rawArtist);
 
   let title = cleanLyricsTitle(rawTitle);
   let artist = cleanArtistName(rawArtist);
@@ -99,6 +188,18 @@ function parseLyricsTarget(track) {
     const normParsed = normalizeLookupText(parsedFromName.artist);
     if (normArtist && normParsed && normParsed.includes(normArtist) && normParsed.length >= normArtist.length + 3) {
       artist = parsedFromName.artist;
+    }
+  }
+
+  if (parsedFromName && parsedFromName.artist && parsedFromName.title) {
+    const parsedArtist = parsedFromName.artist;
+    const parsedTitle = parsedFromName.title;
+    const overlap = tokenOverlapRatio(artist, parsedArtist);
+    const rawTitleNorm = normalizeLookupText(rawTitle);
+    const parsedArtistInTitle = rawTitleNorm && rawTitleNorm.includes(normalizeLookupText(parsedArtist));
+    if ((genericArtist || !artist || overlap < 0.35) && parsedArtistInTitle) {
+      artist = parsedArtist;
+      title = parsedTitle;
     }
   }
 
@@ -125,6 +226,84 @@ function parseLyricsTarget(track) {
   }
 
   return { title: title || cleanTitle(track.title || ''), artist };
+}
+
+function makeOverrideKey(title, artist) {
+  const t = normalizeLookupText(title || '');
+  const a = normalizeLookupText(artist || '');
+  if (!t && !a) return '';
+  return `${t}::${a}`;
+}
+
+function getLyricsOverride(target) {
+  if (!target || !target.title) return null;
+  const key = makeOverrideKey(target.title, target.artist);
+  if (!key) return null;
+  const entry = lyricsOverrides.get(key);
+  if (!entry || !entry.lyrics) return null;
+  return {
+    lyrics: entry.lyrics,
+    source: 'Manual',
+    matchedTitle: entry.title || target.title || '',
+    matchedArtist: entry.artist || target.artist || '',
+  };
+}
+
+async function maybeResolveTrackInfo(track) {
+  if (!track || !track.url || !_resolveTrackInfo) return;
+  if (track._lyricsInfoResolved) return;
+  track._lyricsInfoResolved = true;
+
+  const needsTitle = !track.title || track.title === track.url;
+  const needsAuthor = !track.author || /unknown/i.test(String(track.author));
+  const needsDuration = !track.duration || Number(track.duration) <= 0;
+  if (!needsTitle && !needsAuthor && !needsDuration) return;
+
+  let info = null;
+  try {
+    info = await withTimeout(_resolveTrackInfo(track.url), 2600, 'lyrics-info');
+  } catch (err) {
+    return;
+  }
+  if (!info) return;
+
+  if (needsTitle && info.title) track.title = info.title;
+  if (needsAuthor && info.author) track.author = info.author;
+  if (needsDuration && info.duration) track.duration = info.duration;
+  if (!track.thumbnail && info.thumbnail) track.thumbnail = info.thumbnail;
+}
+
+function setLyricsOverride(track, rawLyrics, { title, artist, addedBy } = {}) {
+  const text = String(rawLyrics || '').trim();
+  if (!text) return { ok: false, reason: 'Lirik kosong tidak bisa disimpan.' };
+
+  let target = { title: cleanLyricsTitle(title || ''), artist: cleanArtistName(artist || '') };
+  if (!target.title) target = parseLyricsTarget(track);
+  if (!target.title) return { ok: false, reason: 'Judul lagu tidak bisa dikenali untuk override.' };
+
+  const key = makeOverrideKey(target.title, target.artist);
+  if (!key) return { ok: false, reason: 'Kunci override tidak valid.' };
+
+  const normalized = normalizeLyricsBody(text) || text;
+  const payload = {
+    lyrics: normalized,
+    title: target.title || '',
+    artist: target.artist || '',
+    addedBy: addedBy || '',
+    addedAt: Date.now(),
+  };
+
+  lyricsOverrides.set(key, payload);
+  saveLyricsOverrides();
+
+  return {
+    ok: true,
+    lyrics: payload.lyrics,
+    source: 'Manual',
+    matchedTitle: payload.title || target.title || '',
+    matchedArtist: payload.artist || target.artist || '',
+    target,
+  };
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
@@ -187,9 +366,22 @@ function pickBestLyricsCandidate(candidates, expectedTitle, expectedArtist) {
 
 function normalizeLyricsBody(raw) {
   if (!raw) return '';
-  let text = String(raw).replace(/\r/g, '').replace(/\n?You might also like[\s\S]*$/i, '').replace(/\n?\d*Embed\s*$/i, '').trim();
+  let text = String(raw)
+    .replace(/\r/g, '')
+    .replace(/\n?You might also like[\s\S]*$/i, '')
+    .replace(/\n?\d*Embed\s*$/i, '')
+    .replace(/\*{2,}\s*This Lyrics is NOT for Commercial use\s*\*{2,}.*$/i, '')
+    .trim();
   if (/^lyrics\s*$/i.test(text)) return '';
   return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function stripLrcTimestamps(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/^\s*\[(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d{1,2})?\]\s*/gm, '')
+    .replace(/^\s*\[(?:ar|ti|al|by|offset|length):[^\]]*\]\s*/gmi, '')
+    .trim();
 }
 
 function isUsableLyricsBody(text) {
@@ -205,6 +397,7 @@ function isUsableLyricsBody(text) {
 function buildLyricsQueries(target) {
   const title = cleanLyricsTitle(target && target.title);
   const artist = cleanArtistName(target && target.artist);
+  const strippedTitle = stripLyricsSeparators(title);
   const artistVariants = buildArtistVariants(artist);
   const queries = new Set();
   if (title && artistVariants.length > 0) {
@@ -212,11 +405,22 @@ function buildLyricsQueries(target) {
       queries.add(`"${title}" "${variant}"`);
       queries.add(`${title} ${variant}`);
       queries.add(`${variant} ${title}`);
+      queries.add(`${title} - ${variant}`);
+      if (strippedTitle && strippedTitle !== title) {
+        queries.add(`"${strippedTitle}" "${variant}"`);
+        queries.add(`${strippedTitle} ${variant}`);
+        queries.add(`${variant} ${strippedTitle}`);
+        queries.add(`${strippedTitle} - ${variant}`);
+      }
     }
   }
   if (title) queries.add(title);
   if (title) queries.add(`${title} lyrics`);
-  return Array.from(queries).filter(Boolean).slice(0, 9);
+  if (strippedTitle && strippedTitle !== title) {
+    queries.add(strippedTitle);
+    queries.add(`${strippedTitle} lyrics`);
+  }
+  return Array.from(queries).filter(Boolean).slice(0, 12);
 }
 
 function buildLyricsTitleVariants(title) {
@@ -224,10 +428,22 @@ function buildLyricsTitleVariants(title) {
   const variants = new Set();
   if (!base) return [];
   variants.add(base);
+  const stripped = stripLyricsSeparators(base);
+  if (stripped && stripped !== base) variants.add(stripped);
   variants.add(base.replace(/[\u2018\u2019]/g, "'"));
   variants.add(base.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim());
   variants.add(base.replace(/\s+(?:ft|feat)\.?\s+.+$/i, '').trim());
   return Array.from(variants).filter(Boolean);
+}
+
+function stripLyricsSeparators(title) {
+  const base = cleanLyricsTitle(title);
+  if (!base) return '';
+  return base
+    .replace(/[|:]/g, ' ')
+    .replace(/\s+-\s+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // ── Fetch helper ──────────────────────────────────────────────────────────────
@@ -250,6 +466,99 @@ async function fetchJsonWithTimeout(url, timeoutMs = 7000) {
 }
 
 // ── Providers ─────────────────────────────────────────────────────────────────
+
+async function tryLrclibLyrics(target) {
+  if (!target || !target.title) return null;
+
+  const titleVariants = buildLyricsTitleVariants(target.title).slice(0, 3);
+  const artist = cleanArtistName(target.artist || '');
+  const duration = Math.max(0, Number(target.duration) || 0);
+
+  const mapLrclibPayload = (payload) => {
+    if (!payload || payload.code === 404) return null;
+    const rawLyrics = payload.plainLyrics || stripLrcTimestamps(payload.syncedLyrics || '');
+    const lyrics = normalizeLyricsBody(rawLyrics);
+    if (!isUsableLyricsBody(lyrics)) return null;
+    return {
+      lyrics,
+      source: 'LRCLIB',
+      matchedTitle: payload.trackName || target.title || '',
+      matchedArtist: payload.artistName || target.artist || '',
+    };
+  };
+
+  if (artist && duration > 0) {
+    for (const title of titleVariants) {
+      if (!title) continue;
+      const signatureParams = new URLSearchParams({
+        track_name: title,
+        artist_name: artist,
+        duration: String(Math.round(duration)),
+      });
+
+      const endpoints = [
+        'https://lrclib.net/api/get-cached',
+        'https://lrclib.net/api/get',
+      ];
+
+      for (const endpoint of endpoints) {
+        const json = await fetchJsonWithTimeout(`${endpoint}?${signatureParams.toString()}`, 9000);
+        const mapped = mapLrclibPayload(json);
+        if (mapped) return mapped;
+      }
+    }
+  }
+
+  const artistVariants = target.artist ? buildArtistVariants(target.artist).slice(0, 3) : [];
+  const attempts = [];
+
+  for (const title of titleVariants) {
+    if (!title) continue;
+    if (artistVariants.length > 0) {
+      for (const artist of artistVariants) {
+        attempts.push({ track: title, artist, q: `${title} ${artist}`.trim() });
+      }
+    } else {
+      attempts.push({ track: title, artist: '', q: title });
+    }
+    attempts.push({ track: '', artist: '', q: title });
+  }
+
+  const seen = new Set();
+  for (const attempt of attempts) {
+    const key = `${attempt.track || ''}|${attempt.artist || ''}|${attempt.q || ''}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const params = new URLSearchParams();
+    if (attempt.track) params.set('track_name', attempt.track);
+    if (attempt.artist) params.set('artist_name', attempt.artist);
+    if (!attempt.track && attempt.q) params.set('q', attempt.q);
+
+    if (!params.has('track_name') && !params.has('q')) continue;
+    const endpoint = `https://lrclib.net/api/search?${params.toString()}`;
+    const json = await fetchJsonWithTimeout(endpoint, 8000);
+    const list = Array.isArray(json) ? json : [];
+    if (list.length === 0) continue;
+
+    const candidates = list.map((item) => ({
+      title: item.trackName || '',
+      fullTitle: `${item.trackName || ''} ${item.artistName || ''}`.trim(),
+      artist: { name: item.artistName || '' },
+      _item: item,
+    }));
+
+    let picked = pickBestLyricsCandidate(candidates, target.title, target.artist);
+    if (!picked && candidates.length > 0) picked = candidates[0];
+    const best = picked && picked._item ? picked._item : null;
+    if (!best) continue;
+
+    const mapped = mapLrclibPayload(best);
+    if (mapped) return mapped;
+  }
+
+  return null;
+}
 
 async function tryGeniusLyrics(target) {
   if (!_geniusClient || !target || !target.title) return null;
@@ -279,6 +588,125 @@ async function tryGeniusLyrics(target) {
       };
     } catch (err) { continue; }
   }
+  return null;
+}
+
+async function tryMusixmatchLyrics(target) {
+  const apiKey = _musixmatchKey ? String(_musixmatchKey).trim() : '';
+  if (!apiKey || !target || !target.title) return null;
+
+  const title = cleanLyricsTitle(target.title);
+  const artist = cleanArtistName(target.artist || '');
+  if (!title) return null;
+
+  const params = new URLSearchParams({
+    apikey: apiKey,
+    q_track: title,
+    f_has_lyrics: '1',
+    format: 'json',
+  });
+  if (artist) params.set('q_artist', artist);
+
+  const endpoint = `https://api.musixmatch.com/ws/1.1/matcher.lyrics.get?${params.toString()}`;
+  const json = await fetchJsonWithTimeout(endpoint, 8000);
+  const status = Number(json && json.message && json.message.header && json.message.header.status_code) || 0;
+  if (status !== 200) return null;
+
+  const lyricsBody = json && json.message && json.message.body && json.message.body.lyrics
+    ? json.message.body.lyrics.lyrics_body
+    : '';
+  const lyrics = normalizeLyricsBody(lyricsBody);
+  if (!isUsableLyricsBody(lyrics)) return null;
+
+  return {
+    lyrics,
+    source: 'Musixmatch',
+    matchedTitle: target.title || '',
+    matchedArtist: target.artist || '',
+  };
+}
+
+async function tryMusixmatchSearchLyrics(target) {
+  const apiKey = _musixmatchKey ? String(_musixmatchKey).trim() : '';
+  if (!apiKey || !target || !target.title) return null;
+
+  const titleVariants = buildLyricsTitleVariants(target.title).slice(0, 3);
+  const artistVariantsRaw = target.artist ? buildArtistVariants(target.artist).slice(0, 3) : [];
+  const artistVariants = artistVariantsRaw.length > 0
+    ? Array.from(new Set([...artistVariantsRaw, '']))
+    : [''];
+  const attempts = [];
+  for (const title of titleVariants) {
+    for (const artist of artistVariants) {
+      const key = `${title}::${artist}`.toLowerCase();
+      attempts.push({ title, artist, key });
+    }
+  }
+
+  const seen = new Set();
+  for (const attempt of attempts) {
+    if (!attempt.title || seen.has(attempt.key)) continue;
+    seen.add(attempt.key);
+
+    const params = new URLSearchParams({
+      apikey: apiKey,
+      q_track: attempt.title,
+      f_has_lyrics: '1',
+      s_track_rating: 'desc',
+      page_size: '6',
+      format: 'json',
+    });
+    if (attempt.artist) params.set('q_artist', attempt.artist);
+
+    const endpoint = `https://api.musixmatch.com/ws/1.1/track.search?${params.toString()}`;
+    const json = await fetchJsonWithTimeout(endpoint, 8000);
+    const status = Number(json && json.message && json.message.header && json.message.header.status_code) || 0;
+    if (status !== 200) continue;
+
+    const list = json && json.message && json.message.body && Array.isArray(json.message.body.track_list)
+      ? json.message.body.track_list
+      : [];
+    if (list.length === 0) continue;
+
+    const tracks = list.map((item) => item && item.track).filter(Boolean);
+    if (tracks.length === 0) continue;
+
+    const candidates = tracks.map((track) => ({
+      title: track.track_name || '',
+      fullTitle: `${track.track_name || ''} ${track.artist_name || ''}`.trim(),
+      artist: { name: track.artist_name || '' },
+      _track: track,
+    }));
+
+    let picked = pickBestLyricsCandidate(candidates, target.title, target.artist);
+    if (!picked && candidates.length > 0) picked = candidates[0];
+    const bestTrack = picked && picked._track ? picked._track : null;
+    if (!bestTrack || !bestTrack.track_id) continue;
+
+    const lyricParams = new URLSearchParams({
+      apikey: apiKey,
+      track_id: String(bestTrack.track_id),
+      format: 'json',
+    });
+    const lyricEndpoint = `https://api.musixmatch.com/ws/1.1/track.lyrics.get?${lyricParams.toString()}`;
+    const lyricJson = await fetchJsonWithTimeout(lyricEndpoint, 8000);
+    const lyricStatus = Number(lyricJson && lyricJson.message && lyricJson.message.header && lyricJson.message.header.status_code) || 0;
+    if (lyricStatus !== 200) continue;
+
+    const lyricsBody = lyricJson && lyricJson.message && lyricJson.message.body && lyricJson.message.body.lyrics
+      ? lyricJson.message.body.lyrics.lyrics_body
+      : '';
+    const lyrics = normalizeLyricsBody(lyricsBody);
+    if (!isUsableLyricsBody(lyrics)) continue;
+
+    return {
+      lyrics,
+      source: 'Musixmatch',
+      matchedTitle: bestTrack.track_name || target.title || '',
+      matchedArtist: bestTrack.artist_name || target.artist || '',
+    };
+  }
+
   return null;
 }
 
@@ -326,11 +754,16 @@ async function tryLegacyLyricsFinder(target) {
 // ── Main lookup ───────────────────────────────────────────────────────────────
 
 async function getTrackLyricsStrict(track) {
+  await maybeResolveTrackInfo(track);
   const target = parseLyricsTarget(track);
+  const duration = Math.max(0, Number(track && track.duration) || 0);
+  if (duration > 0) target.duration = duration;
   if (!target.title) {
     return { ok: false, target, reason: 'Judul lagu tidak bisa dikenali untuk pencarian lirik.' };
   }
-  const providers = [tryGeniusLyrics, tryLyricsOvh, tryLegacyLyricsFinder];
+  const override = getLyricsOverride(target);
+  if (override) return { ok: true, target, ...override };
+  const providers = [tryMusixmatchLyrics, tryMusixmatchSearchLyrics, tryLrclibLyrics, tryGeniusLyrics, tryLyricsOvh, tryLegacyLyricsFinder];
   for (const provider of providers) {
     const result = await provider(target);
     if (result && result.lyrics) return { ok: true, target, ...result };
@@ -449,6 +882,7 @@ function makeLyricsResultMessage(track, result, ownerId, guildId) {
 
 module.exports = {
   init,
+  setLyricsOverride,
   getTrackLyricsStrict,
   getLyricsSession,
   deleteLyricsSession,
@@ -457,3 +891,5 @@ module.exports = {
   makeLyricsResultMessage,
   parseLyricsTarget,
 };
+
+loadLyricsOverrides();

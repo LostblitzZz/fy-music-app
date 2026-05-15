@@ -293,6 +293,31 @@ function prioritizeLikelyMusicEntries(entries) {
     .sort((a, b) => Number(isLikelyMusicEntry(b)) - Number(isLikelyMusicEntry(a)));
 }
 
+function makeSearchResultKey(item) {
+  if (!item) return null;
+  const url = String(item.url || '').trim();
+  const id = extractYouTubeVideoId(url);
+  if (id) return `yt:${id}`;
+  if (url) return `url:${url.toLowerCase()}`;
+  const title = String(item.title || '').toLowerCase().trim();
+  const author = String(item.author || '').toLowerCase().trim();
+  if (!title && !author) return null;
+  return `meta:${title}|${author}`;
+}
+
+function dedupeSearchResults(items) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const key = makeSearchResultKey(item);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || 'youtube:player_client=web,web_safari';
 const YTDLP_JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES || 'node';
 const YTDLP_SEARCH_EXTRACTOR_ARGS = process.env.YTDLP_SEARCH_EXTRACTOR_ARGS || 'youtube:player_client=web_music';
@@ -383,28 +408,68 @@ module.exports = {
       }
 
       const loader = (async () => {
-        const mapVideos = (videos) => videos.slice(0, safeLimit).map((v) => ({
-          title: v.title || 'Unknown Title',
-          url: v.url || '',
-          duration: v.duration && v.duration.seconds ? v.duration.seconds : 0,
-          thumbnail: v.thumbnail || v.image || '',
-          author: (v.author && v.author.name) ? v.author.name : 'Unknown Artist',
-        }));
+        const mapYtdlpEntries = (entries) => {
+          const ordered = prioritizeLikelyMusicEntries(dedupeEntries(entries));
+          const mapped = ordered.map((e) => ({
+            title: e.title || 'Unknown Title',
+            url: toMusicYouTubeUrl(e.webpage_url || e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : '')),
+            duration: e.duration ? parseInt(e.duration) : 0,
+            thumbnail: e.thumbnail || '',
+            author: e.uploader || e.channel || 'Unknown Artist',
+          }));
+          return dedupeSearchResults(mapped).slice(0, safeLimit);
+        };
 
-        // Attempt 1: yt-search with timeout
+        const mapYtSearchVideos = (videos) => {
+          const mapped = videos.slice(0, safeLimit).map((v) => ({
+            title: v.title || 'Unknown Title',
+            url: toMusicYouTubeUrl(v.url || ''),
+            duration: v.duration && v.duration.seconds ? v.duration.seconds : 0,
+            thumbnail: v.thumbnail || v.image || '',
+            author: (v.author && v.author.name) ? v.author.name : 'Unknown Artist',
+          }));
+          return dedupeSearchResults(mapped).slice(0, safeLimit);
+        };
+
+        // Attempt 1: yt-dlp ytsearch using YouTube Music client
+        try {
+          const searchExtractorArgs = YTDLP_SEARCH_EXTRACTOR_ARGS && String(YTDLP_SEARCH_EXTRACTOR_ARGS).trim();
+          const searchOpts = {
+            flatPlaylist: true,
+            noPlaylist: false,
+          };
+          if (searchExtractorArgs) searchOpts.extractorArgs = searchExtractorArgs;
+
+          const info = await runYtdlpJson(`ytsearch${safeLimit}:${normalizedQuery}`,
+            searchOpts,
+            { timeoutMs: 8000 }
+          );
+          const entries = info && Array.isArray(info.entries) ? info.entries : (info && info.title ? [info] : []);
+          if (entries.length > 0) {
+            const mapped = mapYtdlpEntries(entries);
+            if (mapped.length > 0) return mapped;
+          }
+        } catch (err) {
+          console.warn('[playdl-shim] yt-dlp ytmusic search failed:', err && err.message ? err.message : err);
+        }
+
+        // Attempt 2: yt-search with timeout
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const searchPromise = ytSearch(normalizedQuery);
             let timer;
             const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('yt-search timeout')), safeTimeoutMs); });
             const results = await Promise.race([searchPromise, timeout]).finally(() => clearTimeout(timer));
-            if (results && results.videos && results.videos.length > 0) return mapVideos(results.videos);
+            if (results && results.videos && results.videos.length > 0) {
+              const mapped = mapYtSearchVideos(results.videos);
+              if (mapped.length > 0) return mapped;
+            }
           } catch (err) {
             console.warn(`[playdl-shim] yt-search attempt ${attempt + 1} failed:`, err && err.message ? err.message : err);
           }
         }
 
-        // Fallback: yt-dlp ytsearch
+        // Fallback: yt-dlp ytsearch (default YouTube client)
         try {
           console.log('[playdl-shim] falling back to yt-dlp ytsearch for:', normalizedQuery);
           const info = await runYtdlpJson(`ytsearch${safeLimit}:${normalizedQuery}`, {
@@ -413,13 +478,8 @@ module.exports = {
           }, { timeoutMs: 8000 });
           const entries = info && Array.isArray(info.entries) ? info.entries : (info && info.title ? [info] : []);
           if (entries.length > 0) {
-            return entries.slice(0, safeLimit).map((e) => ({
-              title: e.title || 'Unknown Title',
-              url: e.webpage_url || e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : ''),
-              duration: e.duration ? parseInt(e.duration) : 0,
-              thumbnail: e.thumbnail || '',
-              author: e.uploader || e.channel || 'Unknown Artist',
-            }));
+            const mapped = mapYtdlpEntries(entries);
+            if (mapped.length > 0) return mapped;
           }
         } catch (err) {
           console.warn('[playdl-shim] yt-dlp ytsearch fallback failed:', err && err.message ? err.message : err);
@@ -492,8 +552,10 @@ module.exports = {
           '--retry-sleep', 'fragment:exp=1:20',
         ];
 
-        if (YTDLP_EXTRACTOR_ARGS) {
-          args.push('--extractor-args', YTDLP_EXTRACTOR_ARGS);
+        const isSearchTarget = /^ytsearch\d*:/i.test(spawnTarget);
+        const extractorArgs = isSearchTarget ? YTDLP_SEARCH_EXTRACTOR_ARGS : YTDLP_EXTRACTOR_ARGS;
+        if (extractorArgs) {
+          args.push('--extractor-args', extractorArgs);
         }
 
         if (isSoundCloud && SOUNDCLOUD_CLIENT_ID) {

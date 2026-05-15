@@ -252,6 +252,7 @@ class MusicPlayer extends EventEmitter {
       stay24h: !!state.stay24h,
       lastTextChannelId: state.lastTextChannelId || null,
       lastPlayed: Array.isArray(state.lastPlayed) ? state.lastPlayed.slice(-100) : [],
+      lastPlayedTitles: Array.isArray(state.lastPlayedTitles) ? state.lastPlayedTitles.slice(-120) : [],
       updatedAt: Date.now(),
     };
   }
@@ -348,6 +349,9 @@ class MusicPlayer extends EventEmitter {
       state.lastPlayed = Array.isArray(snapshot.lastPlayed)
         ? snapshot.lastPlayed.filter((item) => typeof item === 'string').slice(-100)
         : [];
+      state.lastPlayedTitles = Array.isArray(snapshot.lastPlayedTitles)
+        ? snapshot.lastPlayedTitles.filter((item) => typeof item === 'string').slice(-120)
+        : [];
 
       // Enforce default autoplay on boot.
       state.autoplay = DEFAULT_AUTOPLAY_ENABLED;
@@ -387,6 +391,7 @@ class MusicPlayer extends EventEmitter {
         radio:          { enabled: false, keyword: null },
         stay24h:        false,
         lastPlayed:     [],
+        lastPlayedTitles: [],
         lastTextChannelId: null,
         maxQueue:       500,
         _playingNext:   false,   // guard against re-entrant _playNext calls
@@ -651,31 +656,84 @@ class MusicPlayer extends EventEmitter {
     );
   }
 
+  _normalizeSongTitle(rawTitle, rawAuthor) {
+    let title = String(rawTitle || '').trim();
+    if (!title) return '';
+
+    title = title
+      .replace(/\[[^\]]*\]/g, ' ')
+      .replace(/\([^\)]*\)/g, ' ')
+      .replace(/\s+(?:ft|feat|featuring)\.?\s+.+$/i, ' ')
+      .replace(/\b(official (music )?video|official video|official audio|lyrics?|audio|videoclip|mv|visualizer|live|remix|cover|instrumental|karaoke|slowed|sped up|8d|nightcore|version|performance|hd|4k)\b/ig, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    let normalized = normalizeMatchText(title);
+    if (!normalized) return '';
+
+    const author = normalizeMatchText(rawAuthor || '').replace(/\btopic\b/g, '').trim();
+    if (author && normalized.startsWith(`${author} `)) {
+      normalized = normalized.slice(author.length).trim();
+    }
+
+    return normalized;
+  }
+
+  _trackTitleKey(track) {
+    if (!track) return null;
+    if (typeof track === 'string') {
+      if (/^https?:\/\//i.test(track)) return null;
+      const normalized = this._normalizeSongTitle(track, '');
+      return normalized ? `t:${normalized}` : null;
+    }
+
+    const rawTitle = track.spotifyTitle || track.title || track.search || track.query || '';
+    if (!rawTitle || /^https?:\/\//i.test(String(rawTitle))) return null;
+    const rawAuthor = track.spotifyArtist || track.author || '';
+    const normalized = this._normalizeSongTitle(rawTitle, rawAuthor);
+    return normalized ? `t:${normalized}` : null;
+  }
+
   _rememberPlayed(state, track) {
     if (!state) return;
 
     const key = this._trackIdentityKey(track);
-    if (!key) return;
+    if (key) {
+      const last = state.lastPlayed[state.lastPlayed.length - 1];
+      if (last !== key) {
+        state.lastPlayed.push(key);
+        if (state.lastPlayed.length > 100) state.lastPlayed.shift();
+      }
+    }
 
-    const last = state.lastPlayed[state.lastPlayed.length - 1];
-    if (last === key) return;
-
-    state.lastPlayed.push(key);
-    if (state.lastPlayed.length > 100) state.lastPlayed.shift();
+    const titleKey = this._trackTitleKey(track);
+    if (titleKey) {
+      const lastTitle = state.lastPlayedTitles[state.lastPlayedTitles.length - 1];
+      if (lastTitle !== titleKey) {
+        state.lastPlayedTitles.push(titleKey);
+        if (state.lastPlayedTitles.length > 120) state.lastPlayedTitles.shift();
+      }
+    }
   }
 
   _buildAutoplayAvoidSets(state, previousTrack) {
     const hard = new Set();
     const soft = new Set();
+    const titleHard = new Set();
+    const titleSoft = new Set();
 
     const addHard = (item) => {
       const key = this._trackIdentityKey(item);
       if (key) hard.add(key);
+      const titleKey = this._trackTitleKey(item);
+      if (titleKey) titleHard.add(titleKey);
     };
 
     const addSoft = (item) => {
       const key = this._trackIdentityKey(item);
       if (key) soft.add(key);
+      const titleKey = this._trackTitleKey(item);
+      if (titleKey) titleSoft.add(titleKey);
     };
 
     addHard(previousTrack);
@@ -690,7 +748,15 @@ class MusicPlayer extends EventEmitter {
     for (const item of history.slice(-12)) addHard(item);
     for (const item of history.slice(-80)) addSoft(item);
 
-    return { hard, soft };
+    const titleHistory = Array.isArray(state.lastPlayedTitles) ? state.lastPlayedTitles : [];
+    for (const item of titleHistory.slice(-12)) {
+      if (typeof item === 'string') titleHard.add(item);
+    }
+    for (const item of titleHistory.slice(-80)) {
+      if (typeof item === 'string') titleSoft.add(item);
+    }
+
+    return { hard, soft, titleHard, titleSoft };
   }
 
   _pickAutoplayCandidate(candidates, avoidSets, previousTrack) {
@@ -699,15 +765,21 @@ class MusicPlayer extends EventEmitter {
     const previousKey = this._trackIdentityKey(previousTrack);
     const hard = avoidSets && avoidSets.hard ? avoidSets.hard : new Set();
     const soft = avoidSets && avoidSets.soft ? avoidSets.soft : new Set();
+    const titleHard = avoidSets && avoidSets.titleHard ? avoidSets.titleHard : new Set();
+    const titleSoft = avoidSets && avoidSets.titleSoft ? avoidSets.titleSoft : new Set();
 
     const unique = [];
     const seen = new Set();
+    const titleSeen = new Set();
 
     for (const candidate of candidates) {
       const key = this._trackIdentityKey(candidate);
+      const titleKey = this._trackTitleKey(candidate);
       if (!key || key === previousKey || seen.has(key)) continue;
+      if (titleKey && titleSeen.has(titleKey)) continue;
       seen.add(key);
-      unique.push({ candidate, key });
+      if (titleKey) titleSeen.add(titleKey);
+      unique.push({ candidate, key, titleKey });
     }
 
     if (unique.length === 0) return null;
@@ -718,10 +790,15 @@ class MusicPlayer extends EventEmitter {
       return head[Math.floor(Math.random() * head.length)].candidate;
     };
 
-    const softPool = unique.filter((item) => !soft.has(item.key));
-    const hardPool = unique.filter((item) => !hard.has(item.key));
+    const softPool = unique.filter((item) =>
+      (!item.key || !soft.has(item.key)) && (!item.titleKey || !titleSoft.has(item.titleKey))
+    );
+    const hardPool = unique.filter((item) =>
+      (!item.key || !hard.has(item.key)) && (!item.titleKey || !titleHard.has(item.titleKey))
+    );
+    const idOnlyPool = unique.filter((item) => !item.key || !hard.has(item.key));
 
-    return choose(softPool) || choose(hardPool) || null;
+    return choose(softPool) || choose(hardPool) || choose(idOnlyPool) || null;
   }
 
   _buildAutoplayFallbackQueries(previousTrack) {
