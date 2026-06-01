@@ -362,6 +362,25 @@ function logUserInput({ userId, userTag, guildId, command, input }) {
   }
 }
 
+function formatWibTimestamp(ms) {
+  const dtf = new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = dtf.formatToParts(new Date(ms));
+  const map = {};
+  for (const part of parts) {
+    if (part.type !== 'literal') map[part.type] = part.value;
+  }
+  return `${map.day}/${map.month}/${map.year} ${map.hour}.${map.minute}.${map.second} WIB`;
+}
+
 function buildUserInputLines(limit) {
   if (userInputLog.length === 0) return [];
 
@@ -370,7 +389,7 @@ function buildUserInputLines(limit) {
   const lines = [`🧾 User input terakhir (${items.length}/${userInputLog.length})`];
 
   items.forEach((entry, idx) => {
-    const ts = new Date(entry.at).toISOString().replace('T', ' ').replace('Z', '');
+    const ts = formatWibTimestamp(entry.at);
     const guildLabel = entry.guildId ? formatGuildLabel(entry.guildId) : 'DM';
     const userLabel = entry.userTag ? `${entry.userTag} (${entry.userId})` : entry.userId;
     const inputText = clampText(entry.input || '-', 120);
