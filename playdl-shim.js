@@ -323,7 +323,7 @@ const YTDLP_JS_RUNTIMES = process.env.YTDLP_JS_RUNTIMES || 'node';
 const YTDLP_SEARCH_EXTRACTOR_ARGS = process.env.YTDLP_SEARCH_EXTRACTOR_ARGS || 'youtube:player_client=web_music';
 const SOUNDCLOUD_CLIENT_ID = process.env.SOUNDCLOUD_CLIENT_ID || '';
 
-const SEARCH_CACHE_TTL_MS = Math.max(3000, Number(process.env.SEARCH_CACHE_TTL_MS) || 60000);
+const SEARCH_CACHE_TTL_MS = Math.max(3000, Number(process.env.SEARCH_CACHE_TTL_MS) || 90000);
 const SEARCH_CACHE_MAX_SIZE = Math.max(25, Number(process.env.SEARCH_CACHE_MAX_SIZE) || 300);
 const searchCache = new Map();
 const searchInFlight = new Map();

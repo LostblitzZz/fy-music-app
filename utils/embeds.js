@@ -101,9 +101,10 @@ function makePremiumEmbed(player, guildId, track, presetLabelMap) {
     .addFields({ name: '📋 Next in Queue', value: queueList, inline: false })
     .setColor(0x1DB954)
     .setFooter({ 
-      text: `Requested by ${track.requestedBy || 'Unknown'} • ${new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}`,
+      text: `Requested by ${track.requestedBy || 'Unknown'}`,
       iconURL: track.thumbnail || null
-    });
+    })
+    .setTimestamp();
 
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('player_pause_resume').setLabel('⏯️').setStyle(ButtonStyle.Secondary),

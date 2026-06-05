@@ -124,6 +124,27 @@ function withTimeout(promise, timeoutMs, label) {
   });
 }
 
+// ── Embed fingerprint ─────────────────────────────────────────────────────────
+
+/**
+ * Compute a lightweight fingerprint for Now Playing embed state.
+ * When the fingerprint hasn't changed between updates, we can skip the
+ * Discord API call entirely — saving rate-limit budget.
+ *
+ * @param {object} track   - Currently playing track
+ * @param {number} playbackMs - Current playback position in milliseconds
+ * @param {object} queue   - Queue snapshot { volume, loopMode, shuffle, autoplay, queue }
+ * @returns {string}
+ */
+function computeEmbedFingerprint(track, playbackMs, queue) {
+  if (!track) return 'idle';
+  // Round playback to 15-second buckets so minor ticks don't cause unnecessary edits
+  const progressBucket = Math.floor((playbackMs || 0) / 15000);
+  const queueLen = queue && Array.isArray(queue.queue) ? queue.queue.length : 0;
+  // Compact string — only changes when something the user can see changes
+  return `${track.url || ''}|${progressBucket}|${queue.volume || 0}|${queue.loopMode || 'none'}|${queue.shuffle ? 1 : 0}|${queue.autoplay ? 1 : 0}|${Math.min(queueLen, 5)}`;
+}
+
 module.exports = {
   formatTime,
   formatBytes,
@@ -139,4 +160,5 @@ module.exports = {
   tokenizeLookupText,
   tokenOverlapRatio,
   withTimeout,
+  computeEmbedFingerprint,
 };

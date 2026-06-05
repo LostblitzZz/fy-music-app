@@ -118,7 +118,8 @@ const playShim    = require('./playdl-shim');
 const lyricsFinderLib = require('lyrics-finder');
 
 // ── Utility modules ───────────────────────────────────────────────────────────
-const { formatCooldownSeconds, clampText, makeCooldownNotice } = require('./utils/helpers');
+const { formatCooldownSeconds, clampText, makeCooldownNotice, computeEmbedFingerprint } = require('./utils/helpers');
+const { enqueueVoiceAction, isLocked } = require('./utils/voice-lock');
 const { makeEmbed, makePremiumEmbed, makeQueueOverviewEmbed, makeNowPlayingInfoEmbed, makeHealthEmbed, formatAudioPresetLabel, getAudioPresetListText } = require('./utils/embeds');
 const lyricsEngine = require('./utils/lyrics');
 const spotifyUtil = require('./utils/spotify');
@@ -205,10 +206,13 @@ const client = new Client({
 });
 
 const player = new MusicPlayer();
-const activeMessages = new Map(); // guildId -> { messageId, channelId, interval, lastTrackUrl }
+const activeMessages = new Map(); // guildId -> { messageId, channelId, timeout, lastTrackUrl }
 const commandCooldowns = new Map();
 const autocompleteCache = new Map(); // url -> { title, author, duration, thumbnail, savedAt }
 const voiceStatusChannels = new Map(); // guildId -> channelId
+const buttonUpdateTimers = new Map(); // guildId -> timeoutId
+const queryAutocompleteCache = new Map(); // query -> { items, savedAt }
+const radioRecommendCooldowns = new Map(); // guildId -> timestamp
 const userInputLog = [];
 
 const AUDIO_PRESET_CATALOG = typeof player.getAudioPresetCatalog === 'function'
@@ -261,9 +265,16 @@ const COMMAND_COOLDOWN_MS = {
   dmleave: 2000,
 };
 
-const AUTOCOMPLETE_CACHE_TTL_MS = 4 * 60 * 1000;
+const AUTOCOMPLETE_CACHE_TTL_MS = 8 * 60 * 1000;
 const AUTOCOMPLETE_CACHE_MAX = 300;
+const QUERY_AUTOCOMPLETE_CACHE_TTL_MS = 5 * 60 * 1000;
+const QUERY_AUTOCOMPLETE_CACHE_MAX = 200;
 const USER_INPUT_LOG_MAX = 200;
+
+const RADIO_RECOMMEND_COOLDOWN_MS = 12000;
+const NOW_PLAYING_MIN_INTERVAL_MS = 12000;
+const NOW_PLAYING_MAX_INTERVAL_MS = 45000;
+const NOW_PLAYING_JITTER_MS = 1200;
 
 const STATIC_ACTIVITY_LABEL = String(process.env.STATIC_ACTIVITY || 'Musik');
 
@@ -300,12 +311,9 @@ function cacheAutocompleteItem(item) {
   });
 
   if (autocompleteCache.size > AUTOCOMPLETE_CACHE_MAX) {
-    const entries = Array.from(autocompleteCache.entries());
-    entries.sort((a, b) => (a[1].savedAt || 0) - (b[1].savedAt || 0));
-    const removeCount = Math.max(0, autocompleteCache.size - AUTOCOMPLETE_CACHE_MAX);
-    for (let i = 0; i < removeCount; i++) {
-      const key = entries[i] && entries[i][0];
-      if (key) autocompleteCache.delete(key);
+    for (const key of autocompleteCache.keys()) {
+      autocompleteCache.delete(key);
+      if (autocompleteCache.size <= AUTOCOMPLETE_CACHE_MAX) break;
     }
   }
 }
@@ -323,11 +331,100 @@ function getCachedAutocomplete(url) {
   return cached;
 }
 
+function normalizeQueryKey(input) {
+  return String(input || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+function cacheQueryAutocomplete(query, items) {
+  const key = normalizeQueryKey(query);
+  if (!key) return;
+  const safeItems = Array.isArray(items)
+    ? items
+      .filter(Boolean)
+      .slice(0, 8)
+      .map((item) => ({
+        title: item.title || '',
+        url: item.url || '',
+        author: item.author || '',
+        duration: Number(item.duration) || 0,
+        thumbnail: item.thumbnail || '',
+      }))
+      .filter((item) => item.title || item.url)
+    : [];
+
+  if (safeItems.length === 0) return;
+  queryAutocompleteCache.set(key, { items: safeItems, savedAt: Date.now() });
+
+  if (queryAutocompleteCache.size > QUERY_AUTOCOMPLETE_CACHE_MAX) {
+    for (const cacheKey of queryAutocompleteCache.keys()) {
+      queryAutocompleteCache.delete(cacheKey);
+      if (queryAutocompleteCache.size <= QUERY_AUTOCOMPLETE_CACHE_MAX) break;
+    }
+  }
+}
+
+function getCachedQueryAutocomplete(query) {
+  const key = normalizeQueryKey(query);
+  if (!key) return null;
+  let matchKey = key;
+  let cached = queryAutocompleteCache.get(key);
+
+  if (!cached && key.length >= 3) {
+    for (const [k, v] of queryAutocompleteCache.entries()) {
+      if (k.startsWith(key) && Date.now() - (v.savedAt || 0) <= QUERY_AUTOCOMPLETE_CACHE_TTL_MS) {
+        matchKey = k;
+        cached = v;
+        break;
+      }
+    }
+  }
+
+  if (!cached) return null;
+  if (Date.now() - (cached.savedAt || 0) > QUERY_AUTOCOMPLETE_CACHE_TTL_MS) {
+    queryAutocompleteCache.delete(matchKey);
+    return null;
+  }
+  return cached.items || null;
+}
+
+function buildAutocompleteChoices(items, manualChoice) {
+  const choices = (items || [])
+    .map((item) => ({
+      name: `${item && item.title ? item.title : 'Unknown'}${item && item.author ? ` — ${item.author}` : ''}`.substring(0, 100),
+      value: String((item && (item.url || item.title)) || 'none').substring(0, 100),
+    }))
+    .filter((choice) => choice.name && choice.value);
+
+  if (choices.length === 0) return [manualChoice];
+  return choices.slice(0, 25);
+}
+
+function looksLikeUrl(text) {
+  return /^(?:https?:\/\/|www\.)/i.test(String(text || '').trim());
+}
+
 function applyStaticPresence() {
   if (!client || !client.user) return;
   try {
     client.user.setActivity(STATIC_ACTIVITY_LABEL, { type: 2 });
   } catch (e) {}
+}
+
+// Function enqueueVoiceAction telah dipindahkan ke utils/voice-lock.js
+
+function joinVoiceSafely(guildId, channel) {
+  return enqueueVoiceAction(guildId, () => player.join(channel));
+}
+
+function stopVoiceSafely(guildId, options) {
+  return enqueueVoiceAction(guildId, () => Promise.resolve(player.stop(guildId, options)));
 }
 
 function formatGuildLabel(guildId) {
@@ -337,6 +434,13 @@ function formatGuildLabel(guildId) {
     : null;
   if (!guild) return `${guildId} (unknown guild)`;
   return `${guild.name} (${guild.id})`;
+}
+
+async function getTextChannel(channelId) {
+  if (!channelId || !client || !client.channels) return null;
+  const cached = client.channels.cache.get(channelId);
+  if (cached) return cached;
+  return client.channels.fetch(channelId).catch(() => null);
 }
 
 function isOwner(userId) {
@@ -423,7 +527,6 @@ async function clearVoiceStatus(guildId, { retry = true, channelId: overrideChan
   await tryClear();
   if (retry) {
     setTimeout(() => { void tryClear(); }, 700);
-    setTimeout(() => { void tryClear(); }, 2200);
   }
 
   if (voiceStatusChannels.get(guildId) === channelId) {
@@ -479,6 +582,110 @@ function splitLinesToChunks(lines, maxLen) {
 
   flush();
   return chunks;
+}
+
+function getNowPlayingUpdateIntervalMs(track, queue) {
+  const durationSec = Number(track && track.duration) || 0;
+  let interval = 10000;
+
+  if (durationSec >= 25 * 60) interval = 40000;
+  else if (durationSec >= 15 * 60) interval = 35000;
+  else if (durationSec >= 8 * 60) interval = 25000;
+  else if (durationSec >= 4 * 60) interval = 18000;
+
+  const queueLength = queue && Array.isArray(queue.queue) ? queue.queue.length : 0;
+  if (queueLength >= 25) interval += 6000;
+  else if (queueLength >= 12) interval += 4000;
+  else if (queueLength >= 6) interval += 2000;
+
+  return Math.max(NOW_PLAYING_MIN_INTERVAL_MS, Math.min(NOW_PLAYING_MAX_INTERVAL_MS, interval));
+}
+
+function applyNowPlayingJitter(ms) {
+  const jitter = Math.floor(Math.random() * NOW_PLAYING_JITTER_MS);
+  return ms + jitter;
+}
+
+function clearActiveNowPlaying(guildId) {
+  const info = activeMessages.get(guildId);
+  if (!info) return;
+  if (info.timeout) clearTimeout(info.timeout);
+  activeMessages.delete(guildId);
+}
+
+function forceNowPlayingUpdate(guildId) {
+  const info = activeMessages.get(guildId);
+  if (!info) return;
+  info.lastEmbedFingerprint = null;
+  if (buttonUpdateTimers.has(guildId)) clearTimeout(buttonUpdateTimers.get(guildId));
+  
+  buttonUpdateTimers.set(guildId, setTimeout(async () => {
+    buttonUpdateTimers.delete(guildId);
+    if (!info || info.updating) return;
+    
+    const q = player.getQueue(guildId);
+    if (!q.playing) return;
+    
+    info.updating = true;
+    try {
+      const playbackMs = player.guilds.get(guildId)?.resource?.playbackDuration || 0;
+      info.lastEmbedFingerprint = computeEmbedFingerprint(q.playing, playbackMs, q);
+      const { embed: updatedEmbed, rows: updatedRows } = makePremiumEmbed(player, guildId, q.playing, AUDIO_PRESET_LABEL_MAP);
+      
+      const ch = await getTextChannel(info.channelId);
+      if (!ch) return;
+      const msg = await ch.messages.fetch(info.messageId).catch(() => null);
+      if (msg) {
+        await msg.edit({ embeds: [updatedEmbed], components: updatedRows });
+        info.lastEditedAt = Date.now();
+      }
+    } catch (e) {
+    } finally {
+      info.updating = false;
+    }
+  }, 2000));
+}
+
+function scheduleNowPlayingUpdate(guildId, message, track) {
+  const runUpdate = async () => {
+    const info = activeMessages.get(guildId);
+    if (!info) return;
+
+    if (info.updating) {
+      info.timeout = setTimeout(runUpdate, 1500);
+      return;
+    }
+
+    const q = player.getQueue(guildId);
+    if (!q.playing || q.playing.url !== track.url) {
+      clearActiveNowPlaying(guildId);
+      return;
+    }
+
+    info.updating = true;
+    try {
+      const playbackMs = player.guilds.get(guildId)?.resource?.playbackDuration || 0;
+      const newFingerprint = computeEmbedFingerprint(q.playing, playbackMs, q);
+      if (info.lastEmbedFingerprint !== newFingerprint) {
+        info.lastEmbedFingerprint = newFingerprint;
+        const { embed: updatedEmbed, rows: updatedRows } = makePremiumEmbed(player, guildId, q.playing, AUDIO_PRESET_LABEL_MAP);
+        await message.edit({ embeds: [updatedEmbed], components: updatedRows });
+      }
+      info.lastEditedAt = Date.now();
+    } catch (e) {
+      clearActiveNowPlaying(guildId);
+      return;
+    } finally {
+      info.updating = false;
+    }
+
+    const nextDelay = applyNowPlayingJitter(getNowPlayingUpdateIntervalMs(q.playing, q));
+    info.timeout = setTimeout(runUpdate, nextDelay);
+  };
+
+  const initialDelay = applyNowPlayingJitter(getNowPlayingUpdateIntervalMs(track, player.getQueue(guildId)));
+  const info = activeMessages.get(guildId);
+  if (info) info.timeout = setTimeout(runUpdate, initialDelay);
 }
 
 async function buildVoiceReportForGuild(guild) {
@@ -552,39 +759,41 @@ async function sendVoiceMonitorReport(sendFn) {
 
 // ── Player event handlers ─────────────────────────────────────────────────────
 
+player.on('idleDisconnect', async (guildId, textChannelId) => {
+  if (!textChannelId) return;
+  try {
+    const ch = await getTextChannel(textChannelId);
+    if (ch && ch.send) {
+      ch.send({ embeds: [makeEmbed('👋 Disconnected', 'Bot disconnected (idle timeout).')] });
+    }
+  } catch (e) {}
+});
+
 player.on('trackStart', async (guildId, track) => {
   try {
+    if (track && track.title && track.url) {
+      cacheAutocompleteItem(track);
+      cacheQueryAutocomplete(track.title, [track]);
+    }
     if (!track || !track.textChannelId) return;
-    const ch = await client.channels.fetch(track.textChannelId).catch(() => null);
+    const ch = await getTextChannel(track.textChannelId);
     if (!ch || !ch.send) return;
 
-    // Clean up old interval for this guild
-    if (activeMessages.has(guildId)) {
-      clearInterval(activeMessages.get(guildId).interval);
-    }
+    clearActiveNowPlaying(guildId);
 
     const { embed, rows } = makePremiumEmbed(player, guildId, track, AUDIO_PRESET_LABEL_MAP);
     const msg = await ch.send({ embeds: [embed], components: rows });
 
-    // Store message info and start update interval
-    const interval = setInterval(async () => {
-      try {
-        const q = player.getQueue(guildId);
-        if (!q.playing || q.playing.url !== track.url) {
-          clearInterval(interval);
-          return;
-        }
+    activeMessages.set(guildId, {
+      messageId: msg.id,
+      channelId: ch.id,
+      timeout: null,
+      lastTrackUrl: track.url,
+      updating: false,
+      lastEditedAt: Date.now(),
+    });
 
-        const { embed: updatedEmbed, rows: updatedRows } = makePremiumEmbed(player, guildId, q.playing, AUDIO_PRESET_LABEL_MAP);
-        await msg.edit({ embeds: [updatedEmbed], components: updatedRows }).catch(() => {
-          clearInterval(interval);
-        });
-      } catch (e) {
-        clearInterval(interval);
-      }
-    }, 10000); // Update every 10 seconds to avoid rate limits
-
-    activeMessages.set(guildId, { messageId: msg.id, channelId: ch.id, interval, lastTrackUrl: track.url });
+    scheduleNowPlayingUpdate(guildId, msg, track);
 
     // ── Set Voice Channel Status (DJS v14.12+) ───────────────────────────────
     const guild = client.guilds.cache.get(guildId);
@@ -611,11 +820,7 @@ player.on('trackStart', async (guildId, track) => {
 });
 
 player.on('idle', (guildId) => {
-  if (activeMessages.has(guildId)) {
-    const info = activeMessages.get(guildId);
-    clearInterval(info.interval);
-    activeMessages.delete(guildId);
-  }
+  clearActiveNowPlaying(guildId);
 
   // ── Clear Voice Channel Status & Activity ──────────────────────────────────
   clearVoiceStatus(guildId);
@@ -625,7 +830,12 @@ player.on('idle', (guildId) => {
 player.on('radioRecommend', async (guildId, track) => {
   try {
     if (!track || !track.textChannelId) return;
-    const ch = await client.channels.fetch(track.textChannelId).catch(() => null);
+    const now = Date.now();
+    const lastSent = radioRecommendCooldowns.get(guildId) || 0;
+    if (now - lastSent < RADIO_RECOMMEND_COOLDOWN_MS) return;
+    radioRecommendCooldowns.set(guildId, now);
+
+    const ch = await getTextChannel(track.textChannelId);
     if (!ch || !ch.send) return;
     await ch.send({ content: `🔁 Radio: memutar **${track.title || 'lagu berikutnya'}**...` });
   } catch (err) {
@@ -859,6 +1069,7 @@ client.on('interactionCreate', async (interaction) => {
           } else {
             await interaction.reply({ content: '▶️ Resumed', flags: MessageFlags.Ephemeral });
           }
+          forceNowPlayingUpdate(guildId);
         } catch (e) {
           console.error('[bot] pause/resume button failed:', e && e.message ? e.message : e);
           await interaction.reply({ content: '❌ Failed to toggle pause/resume', flags: MessageFlags.Ephemeral });
@@ -869,29 +1080,34 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: '⏭️ Skipped', flags: MessageFlags.Ephemeral });
       } else if (customId === 'player_stop') {
         await clearVoiceStatus(guildId, { retry: false });
-        player.stop(guildId);
+        await stopVoiceSafely(guildId);
         applyStaticPresence();
         await interaction.reply({ content: '⏹️ Stopped', flags: MessageFlags.Ephemeral });
       } else if (customId === 'player_vol_up') {
         const current = player.getVolume(guildId);
         const next = player.setVolume(guildId, current + 10);
         await interaction.reply({ content: `🔊 Volume: **${next}%**`, flags: MessageFlags.Ephemeral });
+        forceNowPlayingUpdate(guildId);
       } else if (customId === 'player_vol_down') {
         const current = player.getVolume(guildId);
         const next = player.setVolume(guildId, current - 10);
         await interaction.reply({ content: `🔉 Volume: **${next}%**`, flags: MessageFlags.Ephemeral });
+        forceNowPlayingUpdate(guildId);
       } else if (customId === 'player_loop') {
         const q = player.getQueue(guildId);
         const modes = ['none', 'track', 'queue'];
         const nextMode = modes[(modes.indexOf(q.loopMode) + 1) % modes.length];
         player.setLoopMode(guildId, nextMode);
         await interaction.reply({ content: `🔄 Loop Mode: **${nextMode}**`, flags: MessageFlags.Ephemeral });
+        forceNowPlayingUpdate(guildId);
       } else if (customId === 'player_shuffle') {
         const newState = player.toggleShuffle(guildId);
         await interaction.reply({ content: newState ? '🔀 Shuffle: **ON**' : '🔀 Shuffle: **OFF**', flags: MessageFlags.Ephemeral });
+        forceNowPlayingUpdate(guildId);
       } else if (customId === 'player_autoplay') {
         const newState = player.toggleAutoplay(guildId);
         await interaction.reply({ content: newState ? '♾️ Autoplay: **ON**' : '♾️ Autoplay: **OFF**', flags: MessageFlags.Ephemeral });
+        forceNowPlayingUpdate(guildId);
       } else if (customId === 'player_lyrics') {
         const q = player.getQueue(guildId);
         if (!q.playing) return interaction.reply({ content: '❌ Tidak ada lagu yang sedang diputar.', flags: MessageFlags.Ephemeral });
@@ -927,18 +1143,20 @@ client.on('interactionCreate', async (interaction) => {
         value: query.substring(0, 100),
       };
 
+      const cachedItems = getCachedQueryAutocomplete(query);
+      if (cachedItems && cachedItems.length) {
+        const payload = buildAutocompleteChoices(cachedItems, manualChoice);
+        return interaction.respond(payload.slice(0, 25)).catch(() => {});
+      }
+
       try {
         const tracks = await playShim.search(query, { limit: 8, timeoutMs: 2800 });
         const topTracks = (Array.isArray(tracks) ? tracks : []).slice(0, 5);
         for (const item of topTracks) {
           cacheAutocompleteItem(item);
         }
-        const choices = topTracks.map((item) => ({
-          name: `${item && item.title ? item.title : 'Unknown'}${item && item.author ? ` — ${item.author}` : ''}`.substring(0, 100),
-          value: String((item && (item.url || item.title)) || 'none').substring(0, 100),
-        }));
-
-        const payload = choices.length ? choices : [manualChoice];
+        cacheQueryAutocomplete(query, topTracks);
+        const payload = buildAutocompleteChoices(topTracks, manualChoice);
         await interaction.respond(payload.slice(0, 25)).catch(() => {});
       } catch (err) {
         const msg = err && err.message ? err.message : String(err);
@@ -1027,7 +1245,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      await player.join(memberVC);
+      await joinVoiceSafely(interaction.guildId, memberVC);
 
       const queueBefore = player.getQueue(interaction.guildId);
       const willPlayNow = !queueBefore.playing && queueBefore.queue.length === 0;
@@ -1042,12 +1260,15 @@ client.on('interactionCreate', async (interaction) => {
       // Direct YouTube URL (music-only)
       if (spotifyUtil.isYouTubeUrl(query)) {
         const cached = getCachedAutocomplete(query);
-        const check = await spotifyUtil.validateYouTubeMusicLink(query, playShim, { timeoutMs: 800 });
+        // Naikkan timeout ke 7000ms — yt-dlp getInfo butuh ~1-3s, 800ms terlalu sempit
+        const check = await spotifyUtil.validateYouTubeMusicLink(query, playShim, { timeoutMs: 7000 });
         if (!check.ok) {
           return interaction.editReply({ embeds: [makeEmbed('❌ YouTube Music Only', check.reason)] });
         }
         const normalizedUrl = check.normalizedUrl || (cached && cached.url) || query;
-        const displayTitle = check.title || (cached && cached.title) || normalizedUrl;
+        // Jika getInfo masih timeout (title kosong), pakai URL sementara & resolve di background
+        const titleFromCheck = check.title || (cached && cached.title) || '';
+        const displayTitle = titleFromCheck || normalizedUrl;
         await player.enqueue(interaction.guildId, {
           title: displayTitle,
           url: normalizedUrl,
@@ -1057,6 +1278,33 @@ client.on('interactionCreate', async (interaction) => {
           requestedBy: interaction.user.tag,
           textChannelId: interaction.channelId,
         });
+        // Background enrichment: jika title/duration masih kosong, resolve async lalu patch track di queue
+        if (!titleFromCheck || !check.duration) {
+          playShim.getInfo(normalizedUrl).then((info) => {
+            if (!info) return;
+            const q = player.getQueue(interaction.guildId);
+            // Patch playing track jika masih lagu yang sama
+            if (q.playing && q.playing.url === normalizedUrl) {
+              if (!q.playing.title || q.playing.title === normalizedUrl) q.playing.title = info.title || q.playing.title;
+              if (!q.playing.duration) q.playing.duration = info.duration || 0;
+              if (!q.playing.author) q.playing.author = info.author || '';
+              if (!q.playing.thumbnail) q.playing.thumbnail = info.thumbnail || '';
+            }
+            // Patch queue item jika masih menunggu
+            const queueItem = (q.queue || []).find((t) => t.url === normalizedUrl);
+            if (queueItem) {
+              if (!queueItem.title || queueItem.title === normalizedUrl) queueItem.title = info.title || queueItem.title;
+              if (!queueItem.duration) queueItem.duration = info.duration || 0;
+              if (!queueItem.author) queueItem.author = info.author || '';
+              if (!queueItem.thumbnail) queueItem.thumbnail = info.thumbnail || '';
+            }
+            // Simpan ke cache untuk permintaan selanjutnya
+            cacheAutocompleteItem({ url: normalizedUrl, title: info.title, author: info.author, duration: info.duration, thumbnail: info.thumbnail });
+          }).catch(() => {});
+        } else {
+          // Simpan ke cache jika info sudah lengkap
+          cacheAutocompleteItem({ url: normalizedUrl, title: check.title, author: check.author, duration: check.duration, thumbnail: check.thumbnail });
+        }
         if (willPlayNow) {
           return interaction.editReply({ embeds: [makeEmbed('▶️ Playing', `Now playing: ${displayTitle}`)] });
         }
@@ -1070,6 +1318,24 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.editReply({ embeds: [makeEmbed('▶️ Playing', `Now playing: ${query}`)] });
         }
         return interaction.editReply({ embeds: [makeEmbed('✅ Queued', `Added link: ${query}`)] }); // ephemeral already set via deferReply
+      }
+
+      const cachedItems = looksLikeUrl(query) ? null : getCachedQueryAutocomplete(query);
+      const cachedPick = cachedItems && cachedItems[0] && cachedItems[0].url ? cachedItems[0] : null;
+      if (cachedPick) {
+        await player.enqueue(interaction.guildId, {
+          title: cachedPick.title || query,
+          url: cachedPick.url,
+          author: cachedPick.author || undefined,
+          duration: cachedPick.duration || undefined,
+          thumbnail: cachedPick.thumbnail || undefined,
+          requestedBy: interaction.user.tag,
+          textChannelId: interaction.channelId,
+        });
+        if (willPlayNow) {
+          return interaction.editReply({ embeds: [makeEmbed('▶️ Playing', `Playing search result for: **${query}**`)] });
+        }
+        return interaction.editReply({ embeds: [makeEmbed('🔍 Queued', `Queued search: **${query}**`)] });
       }
 
       // Search query
@@ -1089,7 +1355,7 @@ client.on('interactionCreate', async (interaction) => {
     // /stop
     if (commandName === 'stop') {
       const stay = player.getStay24h(interaction.guildId);
-      player.stop(interaction.guildId, { keepConnection: stay });
+      await stopVoiceSafely(interaction.guildId, { keepConnection: stay });
       clearVoiceStatus(interaction.guildId);
       applyStaticPresence();
       return interaction.reply({ embeds: [makeEmbed('⏹ Stop', 'Stopped playback and cleared the queue.')], flags: MessageFlags.Ephemeral });
@@ -1128,7 +1394,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      await player.join(memberVC);
+      await joinVoiceSafely(interaction.guildId, memberVC);
       player.setRadio(interaction.guildId, true, station);
       
       const stationName = RADIO_STATIONS.find(s => s.value === station)?.name || station;
@@ -1149,7 +1415,7 @@ client.on('interactionCreate', async (interaction) => {
     // /leave
     if (commandName === 'leave') {
       player.setStay24h(interaction.guildId, false);
-      player.stop(interaction.guildId, { forceLeave: true });
+      await stopVoiceSafely(interaction.guildId, { forceLeave: true });
       clearVoiceStatus(interaction.guildId);
       applyStaticPresence();
       return interaction.reply({ embeds: [makeEmbed('👋 Leave', 'Left voice channel and disabled 24/7 mode.')], flags: MessageFlags.Ephemeral });
@@ -1321,7 +1587,7 @@ client.on('messageCreate', async (message) => {
         }
 
         player.setStay24h(guild.id, false);
-        player.stop(guild.id, { forceLeave: true });
+        await stopVoiceSafely(guild.id, { forceLeave: true });
         clearVoiceStatus(guild.id);
         applyStaticPresence();
 
@@ -1425,7 +1691,7 @@ client.on('messageCreate', async (message) => {
       const memberVC = message.member && message.member.voice ? message.member.voice.channel : null;
       if (!memberVC) return reply({ embeds: [makeEmbed('❌ Error', 'You must be in a voice channel.')] });
 
-      await player.join(memberVC);
+      await joinVoiceSafely(message.guild.id, memberVC);
       const searching = await reply({ content: '🔍 Searching...' });
       const edit      = (payload) => searching ? searching.edit(payload).catch(() => {}) : Promise.resolve();
 
@@ -1471,6 +1737,24 @@ client.on('messageCreate', async (message) => {
         return edit({ embeds: [makeEmbed('✅ Queued', `Added link: ${query}`)] });
       }
 
+      const cachedItems = looksLikeUrl(query) ? null : getCachedQueryAutocomplete(query);
+      const cachedPick = cachedItems && cachedItems[0] && cachedItems[0].url ? cachedItems[0] : null;
+      if (cachedPick) {
+        await player.enqueue(message.guild.id, {
+          title: cachedPick.title || query,
+          url: cachedPick.url,
+          author: cachedPick.author || undefined,
+          duration: cachedPick.duration || undefined,
+          thumbnail: cachedPick.thumbnail || undefined,
+          requestedBy: message.author.tag,
+          textChannelId: message.channel.id,
+        });
+        if (willPlayNow) {
+          return edit({ embeds: [makeEmbed('▶️ Playing', `Playing search result for: **${query}**`)] });
+        }
+        return edit({ embeds: [makeEmbed('🔍 Queued', `Queued: **${query}**`)] });
+      }
+
       // Search
       await player.enqueue(message.guild.id, { title: query, search: query, requestedBy: message.author.tag, textChannelId: message.channel.id });
       if (willPlayNow) {
@@ -1488,7 +1772,7 @@ client.on('messageCreate', async (message) => {
     // ── !stop ──────────────────────────────────────────────────────────────────
     if (cmd === 'stop') {
       const stay = player.getStay24h(message.guild.id);
-      player.stop(message.guild.id, { keepConnection: stay });
+      await stopVoiceSafely(message.guild.id, { keepConnection: stay });
       clearVoiceStatus(message.guild.id);
       applyStaticPresence();
       return reply({ embeds: [makeEmbed('⏹ Stop', 'Stopped playback and cleared the queue.')] });
@@ -1536,7 +1820,7 @@ client.on('messageCreate', async (message) => {
       const memberVC = message.member && message.member.voice ? message.member.voice.channel : null;
       if (!memberVC) return reply({ embeds: [makeEmbed('❌ Error', 'You must be in a voice channel to start radio.')] });
 
-      await player.join(memberVC);
+      await joinVoiceSafely(message.guild.id, memberVC);
       player.setRadio(message.guild.id, true, station);
       const found = await player.searchTrack(station, []);
       if (found) {
@@ -1551,7 +1835,7 @@ client.on('messageCreate', async (message) => {
       player.setStay24h(message.guild.id, newState);
       if (newState) {
         const memberVC = message.member && message.member.voice ? message.member.voice.channel : null;
-        if (memberVC) await player.join(memberVC).catch(() => {});
+        if (memberVC) await joinVoiceSafely(message.guild.id, memberVC).catch(() => {});
       }
       return reply({ embeds: [makeEmbed('♾ 24/7', newState ? 'Mode 24/7 **aktif**.' : 'Mode 24/7 **dimatikan**.')] });
     }
@@ -1559,7 +1843,7 @@ client.on('messageCreate', async (message) => {
     // ── !leave ─────────────────────────────────────────────────────────────────
     if (cmd === 'leave') {
       player.setStay24h(message.guild.id, false);
-      player.stop(message.guild.id, { forceLeave: true });
+      await stopVoiceSafely(message.guild.id, { forceLeave: true });
       clearVoiceStatus(message.guild.id);
       applyStaticPresence();
       return reply({ embeds: [makeEmbed('👋 Leave', 'Left voice channel and disabled 24/7 mode.')] });

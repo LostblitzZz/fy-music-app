@@ -1074,9 +1074,10 @@ class MusicPlayer extends EventEmitter {
                 ) {
                   try { state.connection.destroy(); } catch (e) {}
                   state.connection = null;
+                  this.emit('idleDisconnect', guildId, state.lastTextChannelId);
                 }
               } catch (e) {}
-            }, 15000);
+            }, 20000);
           }
         }
         return;
@@ -1160,6 +1161,15 @@ class MusicPlayer extends EventEmitter {
         });
 
         console.log('[player] Playing:', next.title || next.url || '<unknown>');
+
+        // Connection guard: ensure we're still connected before playing
+        if (!state.connection || (state.connection.state && state.connection.state.status === VoiceConnectionStatus.Destroyed)) {
+          console.warn('[player] Connection lost before play — aborting track');
+          state.queue.unshift(next);
+          state._needsPlayNext = false;
+          return;
+        }
+
         state.player.play(resource);
         state.playing        = next;
         state.resource       = resource;
