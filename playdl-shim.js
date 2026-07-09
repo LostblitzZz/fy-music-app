@@ -397,9 +397,7 @@ async function getSoundCloudPlaylistTracks(url, { timeoutMs = 30000 } = {}) {
     if (!url || !isSoundCloudPlaylistUrl(url)) return [];
 
     const normalizedUrl = normalizeSoundCloudUrl(url);
-    const extraOpts = {
-      flatPlaylist: true,
-    };
+    const extraOpts = {};
     if (SOUNDCLOUD_CLIENT_ID) {
       extraOpts.extractorArgs = `soundcloud:client_id=${SOUNDCLOUD_CLIENT_ID}`;
     }
