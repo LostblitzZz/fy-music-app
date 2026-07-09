@@ -1111,6 +1111,9 @@ class MusicPlayer extends EventEmitter {
         } else if (/^https?:\/\//i.test(source)) {
           // Other direct URL (SoundCloud, etc.)
           try {
+            if (/soundcloud\.com/i.test(source) && next.duration <= 31 && next.title) {
+              throw new Error('SoundCloud preview track (<= 30s) detected');
+            }
             streamInfo = await play.stream(source, { audioPreset: activePreset, startAtSeconds: resumeAt });
           } catch (streamErr) {
             if (/soundcloud\.com/i.test(source) && next.title) {
