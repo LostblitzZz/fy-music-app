@@ -1110,7 +1110,21 @@ class MusicPlayer extends EventEmitter {
           streamInfo = await play.stream(source, { audioPreset: activePreset, startAtSeconds: resumeAt });
         } else if (/^https?:\/\//i.test(source)) {
           // Other direct URL (SoundCloud, etc.)
-          streamInfo = await play.stream(source, { audioPreset: activePreset, startAtSeconds: resumeAt });
+          try {
+            streamInfo = await play.stream(source, { audioPreset: activePreset, startAtSeconds: resumeAt });
+          } catch (streamErr) {
+            if (/soundcloud\.com/i.test(source) && next.title) {
+              console.log(`[player] SoundCloud stream failed (${streamErr.message ? streamErr.message.substring(0, 50) : 'unknown'}), falling back to YouTube for: ${next.title}`);
+              const query = next.author && next.author !== 'Unknown Artist' ? `${next.title} ${next.author}` : next.title;
+              const results = await play.search(query, { limit: 1, timeoutMs: 2800 });
+              if (!results || results.length === 0) throw streamErr;
+              
+              streamInfo = await play.stream(results[0].url, { audioPreset: activePreset, startAtSeconds: resumeAt });
+              next.url = results[0].url;
+            } else {
+              throw streamErr;
+            }
+          }
         } else {
           // Search query — resolve URL first, then stream
           const strictSpotify = !!(next && next.strictSearch && next.sourceHint === 'spotify');
