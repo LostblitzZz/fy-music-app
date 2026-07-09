@@ -26,6 +26,12 @@ function isSoundCloudUrl(str) {
   return /soundcloud\.com\/.+/i.test(str);
 }
 
+function isSoundCloudPlaylistUrl(str) {
+  const text = String(str || '').toLowerCase().trim();
+  if (!text.includes('soundcloud.com')) return false;
+  return /soundcloud\.com\/[^/]+\/sets\//i.test(text);
+}
+
 function getSpotifyUrlType(str) {
   const input = String(str || '');
   const webMatch = input.match(/open\.spotify\.com\/(track|playlist|album)\//i);
@@ -164,7 +170,7 @@ async function handleSpotify(query, guildId, textChannelId, requestedBy, replyFn
 
 module.exports = {
   init, setClient, getClient,
-  isSpotifyUrl, isYouTubeUrl, isSoundCloudUrl,
+  isSpotifyUrl, isYouTubeUrl, isSoundCloudUrl, isSoundCloudPlaylistUrl,
   getSpotifyUrlType, normalizeSpotifyTrack,
   validateYouTubeMusicLink, handleSpotify,
 };

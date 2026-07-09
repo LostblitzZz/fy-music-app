@@ -228,6 +228,13 @@ function normalizeSoundCloudUrl(input) {
   }
 }
 
+function isSoundCloudPlaylistUrl(input) {
+  const text = String(input || '').toLowerCase().trim();
+  if (!text.includes('soundcloud.com')) return false;
+  // SoundCloud playlists/sets contain /sets/ in the URL path
+  return /soundcloud\.com\/[^/]+\/sets\//i.test(text);
+}
+
 function normalizePlayableTarget(input) {
   const value = String(input || '');
   if (!value) return value;
@@ -378,6 +385,58 @@ function bindCleanupHooks() {
 
 bindCleanupHooks();
 
+/**
+ * Extract all tracks from a SoundCloud playlist/set URL.
+ * Uses yt-dlp --dump-single-json without --no-playlist to get all entries.
+ * @param {string} url - SoundCloud playlist URL (must contain /sets/)
+ * @param {{ timeoutMs?: number }} [runtime]
+ * @returns {Promise<Array<{title: string, url: string, duration: number, thumbnail: string, author: string}>>}
+ */
+async function getSoundCloudPlaylistTracks(url, { timeoutMs = 30000 } = {}) {
+  try {
+    if (!url || !isSoundCloudPlaylistUrl(url)) return [];
+
+    const normalizedUrl = normalizeSoundCloudUrl(url);
+    const extraOpts = {
+      flatPlaylist: true,
+    };
+    if (SOUNDCLOUD_CLIENT_ID) {
+      extraOpts.extractorArgs = `soundcloud:client_id=${SOUNDCLOUD_CLIENT_ID}`;
+    }
+
+    const info = await runYtdlpJson(normalizedUrl, extraOpts, { timeoutMs });
+    if (!info) return [];
+
+    // Single track returned (not a playlist)
+    if (!info.entries && info.title) {
+      return [{
+        title: info.title || 'Unknown Title',
+        url: info.webpage_url || info.original_url || info.url || normalizedUrl,
+        duration: info.duration ? parseInt(info.duration) : 0,
+        thumbnail: info.thumbnail || '',
+        author: info.uploader || info.channel || 'Unknown Artist',
+      }];
+    }
+
+    const entries = Array.isArray(info.entries) ? info.entries : [];
+    if (entries.length === 0) return [];
+
+    return entries
+      .filter(Boolean)
+      .map((e) => ({
+        title: e.title || 'Unknown Title',
+        url: e.webpage_url || e.original_url || e.url || '',
+        duration: e.duration ? parseInt(e.duration) : 0,
+        thumbnail: e.thumbnail || '',
+        author: e.uploader || e.channel || 'Unknown Artist',
+      }))
+      .filter((t) => t.url);
+  } catch (err) {
+    console.error('[playdl-shim] getSoundCloudPlaylistTracks failed:', err && err.message ? err.message : err);
+    return [];
+  }
+}
+
 module.exports = {
   /**
    * Search YouTube for tracks.
@@ -436,7 +495,6 @@ module.exports = {
           const searchExtractorArgs = YTDLP_SEARCH_EXTRACTOR_ARGS && String(YTDLP_SEARCH_EXTRACTOR_ARGS).trim();
           const searchOpts = {
             flatPlaylist: true,
-            noPlaylist: false,
           };
           if (searchExtractorArgs) searchOpts.extractorArgs = searchExtractorArgs;
 
@@ -474,7 +532,6 @@ module.exports = {
           console.log('[playdl-shim] falling back to yt-dlp ytsearch for:', normalizedQuery);
           const info = await runYtdlpJson(`ytsearch${safeLimit}:${normalizedQuery}`, {
             flatPlaylist: true,
-            noPlaylist: false,
           }, { timeoutMs: 8000 });
           const entries = info && Array.isArray(info.entries) ? info.entries : (info && info.title ? [info] : []);
           if (entries.length > 0) {
@@ -813,7 +870,6 @@ module.exports = {
       // YouTube Mix URL pattern: RD + videoId
       const target = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
       const info   = await runYtdlpJson(target, { 
-        noPlaylist: false, 
         playlistItems: `1-${limit}`, 
         flatPlaylist: true 
       });
@@ -843,4 +899,7 @@ module.exports = {
     if (/soundcloud\.com\/.+/.test(str)) return 'soundcloud';
     return false;
   },
+
+  isSoundCloudPlaylistUrl,
+  getSoundCloudPlaylistTracks,
 };

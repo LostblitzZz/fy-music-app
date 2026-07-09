@@ -1313,6 +1313,33 @@ client.on('interactionCreate', async (interaction) => {
 
       // Direct SoundCloud URL
       if (spotifyUtil.isSoundCloudUrl(query)) {
+        // SoundCloud playlist/set — extract all tracks and enqueue batch
+        if (spotifyUtil.isSoundCloudPlaylistUrl(query)) {
+          const scTracks = await playShim.getSoundCloudPlaylistTracks(query, { timeoutMs: 30000 });
+          if (!scTracks || scTracks.length === 0) {
+            return interaction.editReply({ embeds: [makeEmbed('⚠️ SoundCloud', 'Tidak bisa mengambil track dari playlist SoundCloud ini. Pastikan link valid dan tidak private.')] });
+          }
+          const queueSnapshot = player.getQueue(interaction.guildId);
+          const maxQueue = player.guilds.get(interaction.guildId)?.maxQueue || 500;
+          const availableSlots = Math.max(0, maxQueue - queueSnapshot.queue.length);
+          const limit = Math.min(availableSlots, scTracks.length);
+          if (availableSlots <= 0) {
+            return interaction.editReply({ embeds: [makeEmbed('⚠️ Queue Full', `Queue sudah penuh (**${maxQueue}** lagu).`)] });
+          }
+          const items = scTracks.slice(0, limit).map((t) => ({
+            title: t.title || 'Unknown Title',
+            url: t.url,
+            author: t.author || undefined,
+            duration: t.duration || undefined,
+            thumbnail: t.thumbnail || undefined,
+            requestedBy: interaction.user.tag,
+            textChannelId: interaction.channelId,
+          }));
+          await player.enqueue(interaction.guildId, items);
+          const truncatedText = scTracks.length > limit ? `\n\n⚠️ Sebagian lagu tidak dimasukkan karena slot queue tersisa **${availableSlots}**.` : '';
+          return interaction.editReply({ embeds: [makeEmbed('✅ SoundCloud Playlist', `Berhasil menambahkan **${items.length}** lagu dari playlist SoundCloud.${truncatedText}`)] });
+        }
+        // Single SoundCloud track
         await player.enqueue(interaction.guildId, { title: query, url: query, requestedBy: interaction.user.tag, textChannelId: interaction.channelId });
         if (willPlayNow) {
           return interaction.editReply({ embeds: [makeEmbed('▶️ Playing', `Now playing: ${query}`)] });
@@ -1730,6 +1757,33 @@ client.on('messageCreate', async (message) => {
 
       // Direct SoundCloud URL
       if (spotifyUtil.isSoundCloudUrl(query)) {
+        // SoundCloud playlist/set — extract all tracks and enqueue batch
+        if (spotifyUtil.isSoundCloudPlaylistUrl(query)) {
+          const scTracks = await playShim.getSoundCloudPlaylistTracks(query, { timeoutMs: 30000 });
+          if (!scTracks || scTracks.length === 0) {
+            return edit({ embeds: [makeEmbed('⚠️ SoundCloud', 'Tidak bisa mengambil track dari playlist SoundCloud ini. Pastikan link valid dan tidak private.')] });
+          }
+          const queueSnapshot = player.getQueue(message.guild.id);
+          const maxQueue = player.guilds.get(message.guild.id)?.maxQueue || 500;
+          const availableSlots = Math.max(0, maxQueue - queueSnapshot.queue.length);
+          const limit = Math.min(availableSlots, scTracks.length);
+          if (availableSlots <= 0) {
+            return edit({ embeds: [makeEmbed('⚠️ Queue Full', `Queue sudah penuh (**${maxQueue}** lagu).`)] });
+          }
+          const items = scTracks.slice(0, limit).map((t) => ({
+            title: t.title || 'Unknown Title',
+            url: t.url,
+            author: t.author || undefined,
+            duration: t.duration || undefined,
+            thumbnail: t.thumbnail || undefined,
+            requestedBy: message.author.tag,
+            textChannelId: message.channel.id,
+          }));
+          await player.enqueue(message.guild.id, items);
+          const truncatedText = scTracks.length > limit ? `\n\n⚠️ Sebagian lagu tidak dimasukkan karena slot queue tersisa **${availableSlots}**.` : '';
+          return edit({ embeds: [makeEmbed('✅ SoundCloud Playlist', `Berhasil menambahkan **${items.length}** lagu dari playlist SoundCloud.${truncatedText}`)] });
+        }
+        // Single SoundCloud track
         await player.enqueue(message.guild.id, { title: query, url: query, requestedBy: message.author.tag, textChannelId: message.channel.id });
         if (willPlayNow) {
           return edit({ embeds: [makeEmbed('▶️ Playing', `Now playing: ${query}`)] });
